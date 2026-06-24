@@ -1,0 +1,69 @@
+---
+import BaseLayout from "@layouts/BaseLayout.astro";
+import PostCard from "@components/PostCard.astro";
+import { getFeaturedPosts, getPublishedPosts } from "@lib/posts";
+
+const featuredPosts = await getFeaturedPosts();
+const latestPosts = (featuredPosts.length ? featuredPosts : await getPublishedPosts()).slice(0, 3);
+---
+
+<BaseLayout>
+  <main>
+    <section class="site-shell hero">
+      <div>
+        <p class="eyebrow">Backend Engineering Notes</p>
+        <h1>도메인 상태와 운영 리스크를 함께 설계합니다.</h1>
+        <p class="lead">
+          이벤트 검수, 정산 비용확정, 송금 안정성, 인프라와 관측성을 중심으로
+          실제 운영에서 흔들리지 않는 백엔드 구조를 기록합니다.
+        </p>
+        <div class="hero-actions">
+          <a class="button primary" href="/posts/">글 보기</a>
+          <a class="button" href="/resume/">이력서 보기</a>
+        </div>
+      </div>
+      <figure class="system-visual">
+        <img src="/system-map.svg" alt="Approval, Outbox, Settlement, Security, Infra, Observability로 이어지는 백엔드 시스템 지도" />
+      </figure>
+    </section>
+
+    <section class="site-shell section">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Selected Posts</p>
+          <h2>먼저 읽기 좋은 설계 기록</h2>
+          <p>
+            코드를 그대로 공개하기보다 문제, 제약, 판단, 운영 리스크를 익명화해 정리합니다.
+          </p>
+        </div>
+        <a class="button" href="/posts/">전체 글</a>
+      </div>
+      <div class="post-grid">
+        {latestPosts.map((post) => <PostCard post={post} />)}
+      </div>
+    </section>
+
+    <section class="site-shell section">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Working Principles</p>
+          <h2>백엔드 설계에서 중요하게 보는 것</h2>
+        </div>
+      </div>
+      <div class="principles">
+        <section class="principle">
+          <h3>상태 전이</h3>
+          <p>데이터가 언제 바뀌고, 언제 더 이상 바뀌면 안 되는지를 먼저 모델링합니다.</p>
+        </section>
+        <section class="principle">
+          <h3>재처리 가능성</h3>
+          <p>외부 API와 비동기 작업은 실패를 전제로 두고 멱등성과 복구 경로를 둡니다.</p>
+        </section>
+        <section class="principle">
+          <h3>운영 추적성</h3>
+          <p>승인, 송금, 비용확정처럼 민감한 작업은 이력과 산출 근거를 남깁니다.</p>
+        </section>
+      </div>
+    </section>
+  </main>
+</BaseLayout>

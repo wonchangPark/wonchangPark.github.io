@@ -1,0 +1,38 @@
+---
+import BaseLayout from "@layouts/BaseLayout.astro";
+import { getPublishedPosts } from "@lib/posts";
+
+const posts = await getPublishedPosts();
+---
+
+<BaseLayout title="Posts - 박원창" description="백엔드 설계와 운영 안정성에 대한 글 목록">
+  <main class="site-shell section">
+    <p class="eyebrow">Posts</p>
+    <h1>기술 기록</h1>
+    <p class="lead">
+      실제 회사 코드를 공개하지 않고, 문제와 설계 판단을 일반화해 정리한 백엔드 엔지니어링 노트입니다.
+    </p>
+    <div class="post-list" style="margin-top: 42px">
+      {
+        posts.map((post) => (
+          <a class="post-row" href={`/posts/${post.id}/`}>
+            <time datetime={post.data.pubDate.toISOString()}>
+              {post.data.pubDate.toLocaleDateString("ko-KR", {
+                year: "numeric",
+                month: "short",
+                day: "numeric"
+              })}
+            </time>
+            <div>
+              <h2>{post.data.title}</h2>
+              <p>{post.data.description}</p>
+              <div class="tag-list" aria-label="Tags">
+                {post.data.tags.map((tag) => <span class="tag">{tag}</span>)}
+              </div>
+            </div>
+          </a>
+        ))
+      }
+    </div>
+  </main>
+</BaseLayout>

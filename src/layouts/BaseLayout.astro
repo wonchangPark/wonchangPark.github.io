@@ -1,0 +1,53 @@
+---
+import "@styles/global.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "박원창 - Backend Engineering Notes",
+  description = "도메인 상태, 정산, 승인 workflow, 운영 안정성을 다루는 백엔드 개발 블로그"
+} = Astro.props;
+
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="description" content={description} />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="canonical" href={canonical} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonical} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-shell nav">
+        <a class="brand" href="/" aria-label="Home">
+          <span class="brand-mark">W</span>
+          <span>Wonchang Park</span>
+        </a>
+        <nav class="nav-links" aria-label="Main navigation">
+          <a href="/posts/">Posts</a>
+          <a href="/resume/">Resume</a>
+          <a href="/about/">About</a>
+          <a href="https://github.com/wonchangPark">GitHub</a>
+        </nav>
+      </div>
+    </header>
+    <slot />
+    <footer class="site-footer">
+      <div class="site-shell">
+        Backend engineering notes on domain modeling, reliability, security, and operations.
+      </div>
+    </footer>
+  </body>
+</html>

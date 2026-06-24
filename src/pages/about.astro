@@ -1,0 +1,26 @@
+---
+import BaseLayout from "@layouts/BaseLayout.astro";
+---
+
+<BaseLayout title="About - 박원창" description="박원창 백엔드 엔지니어 소개">
+  <main class="site-shell resume-panel">
+    <section>
+      <p class="eyebrow">About</p>
+      <h1>운영 가능한 백엔드를 만드는 개발자</h1>
+      <p class="lead">
+        Java와 Spring Boot를 중심으로 도메인 모델링, 정산, 승인 workflow, 비동기 처리,
+        보안, 인프라, 관측성을 다룹니다.
+      </p>
+    </section>
+    <section class="resume-box">
+      <h2>관심사</h2>
+      <ul>
+        <li>승인 전 실제 데이터를 오염시키지 않는 workflow 설계</li>
+        <li>비용확정, 송금, 정산처럼 감사 가능성이 필요한 도메인 모델링</li>
+        <li>Outbox, 멱등성, lock, scheduler를 활용한 장애 격리</li>
+        <li>KMS, RBAC, audit log, secret boundary 기반 운영 보안</li>
+        <li>Terraform과 OpenTelemetry 기반 재현 가능한 운영 환경</li>
+      </ul>
+    </section>
+  </main>
+</BaseLayout>
