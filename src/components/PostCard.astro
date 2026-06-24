@@ -13,13 +13,15 @@ const formattedDate = post.data.pubDate.toLocaleDateString("ko-KR", {
 });
 ---
 
-<a class="post-card" href={`/posts/${post.id}/`}>
-  <div>
-    <time datetime={post.data.pubDate.toISOString()}>{formattedDate}</time>
+<a class="post-card article-link" href={`/posts/${post.id}/`}>
+  <div class="post-card-main">
+    <p class="article-meta">
+      {post.data.category} · {post.data.author} · <time datetime={post.data.pubDate.toISOString()}>{formattedDate}</time>
+    </p>
     <h3>{post.data.title}</h3>
     <p>{post.data.description}</p>
   </div>
   <div class="tag-list" aria-label="Tags">
-    {post.data.tags.slice(0, 3).map((tag) => <span class="tag">{tag}</span>)}
+    {post.data.tags.slice(0, 2).map((tag) => <span class="tag">{tag}</span>)}
   </div>
 </a>

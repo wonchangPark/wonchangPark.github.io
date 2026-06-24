@@ -5,10 +5,12 @@ interface Props {
   title: string;
   description: string;
   pubDate: Date;
+  category: string;
+  author: string;
   tags: string[];
 }
 
-const { title, description, pubDate, tags } = Astro.props;
+const { title, description, pubDate, category, author, tags } = Astro.props;
 const formattedDate = pubDate.toLocaleDateString("ko-KR", {
   year: "numeric",
   month: "long",
@@ -21,7 +23,7 @@ const formattedDate = pubDate.toLocaleDateString("ko-KR", {
     <p class="eyebrow">Engineering Note</p>
     <h1>{title}</h1>
     <p class="lead">{description}</p>
-    <p class="article-meta">{formattedDate}</p>
+    <p class="article-meta">{category} · {author} · {formattedDate}</p>
     <div class="tag-list" aria-label="Tags">
       {tags.map((tag) => <span class="tag">{tag}</span>)}
     </div>

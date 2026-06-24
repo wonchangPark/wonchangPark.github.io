@@ -9,6 +9,8 @@ const blog = defineCollection({
     description: z.string(),
     pubDate: z.coerce.date(),
     updatedDate: z.coerce.date().optional(),
+    category: z.string().default("Engineering"),
+    author: z.string().default("박원창"),
     tags: z.array(z.string()),
     featured: z.boolean().default(false)
   })
