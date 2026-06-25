@@ -1,8 +1,8 @@
 ---
 import BaseLayout from "@layouts/BaseLayout.astro";
-import { getPublishedPosts } from "@lib/posts";
+import { getRepresentativePosts } from "@lib/posts";
 
-const posts = await getPublishedPosts();
+const posts = await getRepresentativePosts();
 ---
 
 <BaseLayout title="Posts - 박원창" description="백엔드 설계와 운영 안정성에 대한 글 목록">
@@ -19,6 +19,7 @@ const posts = await getPublishedPosts();
         posts.map((post) => (
           <a class="post-row article-link" href={`/posts/${post.id}/`}>
             <p class="article-meta">
+              {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
               {post.data.category} · {post.data.author}
               <br />
               <time datetime={post.data.pubDate.toISOString()}>
@@ -32,9 +33,9 @@ const posts = await getPublishedPosts();
             <div>
               <h2>{post.data.title}</h2>
               <p>{post.data.description}</p>
-              <div class="tag-list" aria-label="Tags">
-                {post.data.tags.map((tag) => <span class="tag">{tag}</span>)}
-              </div>
+              <ul class="tag-list" aria-label="Tags">
+                {post.data.tags.map((tag) => <li><span class="tag">{tag}</span></li>)}
+              </ul>
             </div>
           </a>
         ))

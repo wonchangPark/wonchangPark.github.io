@@ -1,9 +1,12 @@
 ---
-title: "정산 비용확정에서 산출 근거를 보존하는 법"
-description: "거래처 단가가 변경되어도 과거 확정 비용의 근거가 흔들리지 않도록 단가 버전과 비용확정 snapshot을 분리한 설계 기록입니다."
+title: "단가가 바뀌어도 정산 비용 근거를 보존하는 설계"
+description: "거래처 단가가 변경되어도 과거 확정 비용의 산출 근거가 흔들리지 않도록 단가 버전과 비용확정 snapshot을 분리한 설계 기록입니다."
 pubDate: 2026-06-21
+category: "Settlement"
 tags: ["Settlement", "Ledger", "JPA", "Accounting"]
 featured: false
+priority: 3
+proof: "산출 근거와 감사성"
 ---
 
 정산 도메인에서 가장 조심해야 하는 문장은 이것입니다.

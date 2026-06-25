@@ -8,8 +8,8 @@ import BaseLayout from "@layouts/BaseLayout.astro";
       <p class="eyebrow">Resume</p>
       <h1>Backend Engineer</h1>
       <p class="lead">
-        Spring Boot / Java 기반으로 Club Minish 서비스와 정산 시스템의 핵심 도메인을 설계하고 구현했습니다.
-        이벤트 검수, 가격 재계산, 비용확정, CMS 송금, 대시보드, 권한/감사, 인프라/관측성까지 제품 운영에 필요한 백엔드 영역을 다뤘습니다.
+        Java/Spring Boot 기반으로 Club Minish 서비스와 정산 시스템의 핵심 도메인을 설계하고 구현했습니다.
+        승인, 정산, 송금처럼 실패 비용이 큰 흐름에서 상태 전이, 감사 가능성, 재처리 경로, 운영 보안까지 함께 다뤘습니다.
       </p>
       <div class="hero-actions">
         <a class="button primary" href="https://github.com/wonchangPark">GitHub</a>
@@ -20,9 +20,10 @@ import BaseLayout from "@layouts/BaseLayout.astro";
       <h2>핵심 경험</h2>
       <ul>
         <li>Club Minish 162개 merged PR, 정산 시스템 131개 merged PR 수행</li>
-        <li>JSONB snapshot 기반 이벤트 approval workflow 설계</li>
-        <li>Outbox/SQS 기반 이벤트 가격 재계산 파이프라인 구현</li>
-        <li>5단계 정산 프로세스와 비용확정 snapshot 설계</li>
+        <li>주요 기능 PR에서 696~733개 테스트를 통과시키며 정산/검수 흐름의 회귀 위험을 낮춤</li>
+        <li>JSONB snapshot과 approvalGroupId 기반 이벤트 approval workflow 설계</li>
+        <li>Outbox/SQS 기반 이벤트 가격 재계산 파이프라인으로 저장 실패와 파생 계산 실패를 분리</li>
+        <li>5단계 정산 프로세스와 비용확정 snapshot으로 과거 산출 근거 보존</li>
         <li>CMS/Hecto 송금 멱등성, 결과 조회, KMS 암호화 적용</li>
         <li>Terraform 기반 ECS/RDS/ElastiCache/KMS 인프라 구성</li>
         <li>OpenTelemetry, Loki, Prometheus, Tempo, Grafana 관측성 스택 구성</li>

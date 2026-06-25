@@ -12,7 +12,9 @@ const blog = defineCollection({
     category: z.string().default("Engineering"),
     author: z.string().default("박원창"),
     tags: z.array(z.string()),
-    featured: z.boolean().default(false)
+    featured: z.boolean().default(false),
+    priority: z.number().default(99),
+    proof: z.string().optional()
   })
 });
 

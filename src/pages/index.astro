@@ -1,12 +1,14 @@
 ---
 import BaseLayout from "@layouts/BaseLayout.astro";
 import PostCard from "@components/PostCard.astro";
-import { getFeaturedPosts, getPublishedPosts } from "@lib/posts";
+import { getPublishedPosts, getRepresentativePosts } from "@lib/posts";
 
-const featuredPosts = await getFeaturedPosts();
+const representativePosts = await getRepresentativePosts();
 const posts = await getPublishedPosts();
-const heroPost = featuredPosts[0] ?? posts[0];
-const latestPosts = posts.filter((post) => post.id !== heroPost?.id).slice(0, 4);
+const heroPost = representativePosts[0] ?? posts[0];
+const readingPathPosts = representativePosts
+  .filter((post) => post.id !== heroPost?.id)
+  .slice(0, 4);
 ---
 
 <BaseLayout>
@@ -14,52 +16,67 @@ const latestPosts = posts.filter((post) => post.id !== heroPost?.id).slice(0, 4)
     <section class="hero-wrap">
       <div class="site-shell hero">
         <div>
-          <div class="category-tabs" aria-label="Categories">
-            <a class="category-tab active" href="/posts/">Engineering</a>
-            <a class="category-tab" href="/resume/">Resume</a>
-            <a class="category-tab" href="/about/">About</a>
-          </div>
-          <p class="eyebrow">Backend Engineering Notes</p>
-          <h1>운영에서 흔들리지 않는 백엔드 설계를 기록합니다.</h1>
+          <nav class="topic-tabs" aria-label="대표 기술 주제">
+            <ul class="category-tabs">
+              <li><a class="category-tab active" href="/posts/event-approval-jsonb-snapshot/">Domain Modeling</a></li>
+              <li><a class="category-tab" href="/posts/outbox-sqs-price-recalculation/">Reliability</a></li>
+              <li><a class="category-tab" href="/posts/settlement-cost-confirmation-snapshot/">Settlement</a></li>
+              <li><a class="category-tab" href="/posts/kms-terraform-secret-boundary/">Infra / Security</a></li>
+            </ul>
+          </nav>
+          <p class="eyebrow">Java/Spring Backend Engineer</p>
+          <h1>
+            <span>정산·승인·송금처럼</span>
+            <span>실패 비용이 큰 도메인을</span>
+            <span>안정적으로 설계합니다.</span>
+          </h1>
           <p class="lead">
-            이벤트 검수, 정산 비용확정, 송금 안정성, 인프라와 관측성을 중심으로
-            도메인 상태와 운영 리스크를 함께 다룬 경험을 씁니다.
+            Club Minish와 정산 시스템에서 293+ merged PR로 approval workflow, 비용확정 snapshot,
+            Outbox/SQS 재처리, KMS/Terraform 운영 경계를 구현했습니다. 실제 코드는 공개하지 않고
+            문제, 설계 판단, 운영 효과를 일반화해 기록합니다.
           </p>
           <div class="hero-actions">
-            <a class="button primary" href="/posts/">아티클 읽기</a>
-            <a class="button quiet" href="/resume/">이력 요약</a>
+            <a class="button primary" href="#representative-posts">대표 설계 글 보기</a>
+            <a class="text-link" href="/resume/">이력 요약</a>
+            <a class="text-link" href="https://github.com/wonchangPark">GitHub</a>
           </div>
         </div>
-        <aside class="profile-panel" aria-label="Profile summary">
-          <img src="https://github.com/wonchangPark.png" alt="박원창 GitHub profile" />
-          <div>
-            <p class="profile-role">Backend Engineer</p>
-            <h2>박원창</h2>
-            <p>Java, Spring Boot, 정산, approval workflow, reliability, cloud infra.</p>
-          </div>
-          <dl class="metric-list">
-            <div>
-              <dt>PRs</dt>
-              <dd>293+</dd>
-            </div>
-            <div>
-              <dt>Posts</dt>
-              <dd>5</dd>
-            </div>
-            <div>
-              <dt>Focus</dt>
-              <dd>Ops</dd>
-            </div>
-          </dl>
+        <aside class="hero-evidence" aria-label="Portfolio evidence">
+          <p class="kicker">Evidence</p>
+          <ul class="evidence-list">
+            <li>
+              <strong>293+ merged PRs</strong>
+              <span>Club Minish 162개, 정산 시스템 131개 PR로 기능 설계와 운영 개선을 지속했습니다.</span>
+            </li>
+            <li>
+              <strong>5-step settlement flow</strong>
+              <span>preview, confirm, payment, transfer, audit 흐름에서 비용 근거와 상태 전이를 분리했습니다.</span>
+            </li>
+            <li>
+              <strong>Outbox / KMS / OTel</strong>
+              <span>장애 격리, secret 경계, 관측성까지 제품 운영에 필요한 백엔드 기반을 다뤘습니다.</span>
+            </li>
+          </ul>
         </aside>
       </div>
     </section>
 
     {heroPost && (
-      <section class="site-shell feature-section">
+      <section class="site-shell feature-section" id="representative-posts">
+        <div class="section-header compact">
+          <div>
+            <p class="eyebrow">Portfolio Reading Path</p>
+            <h2>대표 기술 글</h2>
+            <p>
+              면접에서 바로 설명하기 좋은 설계 경험을 approval, reliability, settlement, migration, infra 순서로 정리했습니다.
+            </p>
+          </div>
+          <a class="text-link" href="/posts/">전체 글 보기</a>
+        </div>
         <a class="featured-story article-link" href={`/posts/${heroPost.id}/`}>
           <div>
             <p class="article-meta">
+              {heroPost.data.proof && <span class="proof-label">{heroPost.data.proof}</span>}
               Featured · {heroPost.data.category} · {heroPost.data.author}
             </p>
             <h2>{heroPost.data.title}</h2>
@@ -82,13 +99,13 @@ const latestPosts = posts.filter((post) => post.id !== heroPost?.id).slice(0, 4)
     <section class="site-shell section article-section">
       <div class="section-header compact">
         <div>
-          <p class="eyebrow">Latest</p>
-          <h2>전체 아티클</h2>
+          <p class="eyebrow">Selected Notes</p>
+          <h2>문제 해결 흐름</h2>
         </div>
         <a class="text-link" href="/posts/">모두 보기</a>
       </div>
       <div class="post-list subtle-list">
-        {latestPosts.map((post) => <PostCard post={post} />)}
+        {readingPathPosts.map((post) => <PostCard post={post} />)}
       </div>
     </section>
 

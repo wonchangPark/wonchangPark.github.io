@@ -1,9 +1,12 @@
 ---
-title: "event_template을 event 중심 구조로 병합한 마이그레이션"
-description: "초기에는 재사용 가능한 이벤트 템플릿과 운영 이벤트를 분리했고, 정책 변화 이후에는 데이터 보존과 rollback을 고려해 event 중심 구조로 병합했습니다."
+title: "템플릿 분리를 걷어내고 이벤트 중심 모델로 마이그레이션한 이유"
+description: "초기 event_template 추상화를 정책 변화에 맞춰 event 중심 구조로 병합하고, 데이터 보존과 rollback을 함께 고려한 마이그레이션 기록입니다."
 pubDate: 2026-06-23
+category: "Migration"
 tags: ["Migration", "PostgreSQL", "Domain Modeling", "Flyway"]
 featured: true
+priority: 4
+proof: "정책 변화와 데이터 보존"
 ---
 
 도메인 모델은 처음부터 완벽하게 맞추기 어렵습니다. 특히 제품 정책이 빠르게 바뀌는 초기 서비스에서는 “지금 맞는 추상화”가 몇 달 뒤에는 오히려 복잡도를 만들기도 합니다.

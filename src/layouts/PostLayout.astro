@@ -1,5 +1,6 @@
 ---
 import BaseLayout from "./BaseLayout.astro";
+import type { CollectionEntry } from "astro:content";
 
 interface Props {
   title: string;
@@ -8,9 +9,20 @@ interface Props {
   category: string;
   author: string;
   tags: string[];
+  proof?: string;
+  relatedPosts?: CollectionEntry<"blog">[];
 }
 
-const { title, description, pubDate, category, author, tags } = Astro.props;
+const {
+  title,
+  description,
+  pubDate,
+  category,
+  author,
+  tags,
+  proof,
+  relatedPosts = []
+} = Astro.props;
 const formattedDate = pubDate.toLocaleDateString("ko-KR", {
   year: "numeric",
   month: "long",
@@ -24,11 +36,42 @@ const formattedDate = pubDate.toLocaleDateString("ko-KR", {
     <h1>{title}</h1>
     <p class="lead">{description}</p>
     <p class="article-meta">{category} · {author} · {formattedDate}</p>
-    <div class="tag-list" aria-label="Tags">
-      {tags.map((tag) => <span class="tag">{tag}</span>)}
-    </div>
+    <ul class="tag-list" aria-label="Tags">
+      {tags.map((tag) => <li><span class="tag">{tag}</span></li>)}
+    </ul>
     <div class="article-body">
       <slot />
     </div>
+    <footer class="article-followup">
+      <section class="article-signal">
+        <p class="eyebrow">Hiring Signal</p>
+        <h2>이 글이 보여주는 역량</h2>
+        <ul class="signal-list">
+          <li><strong>분야</strong><span>{category}</span></li>
+          {proof && <li><strong>증거</strong><span>{proof}</span></li>}
+          <li><strong>기술 키워드</strong><span>{tags.slice(0, 3).join(" / ")}</span></li>
+        </ul>
+        <div class="cta-row">
+          <a class="button primary" href="/resume/">이력에서 보기</a>
+          <a class="button" href="https://github.com/wonchangPark">GitHub 보기</a>
+        </div>
+      </section>
+      {relatedPosts.length > 0 && (
+        <section class="related-posts" aria-labelledby="related-posts-title">
+          <p class="eyebrow">Next</p>
+          <h2 id="related-posts-title">다음으로 읽기</h2>
+          <ul class="related-list">
+            {relatedPosts.map((post) => (
+              <li>
+                <a class="article-link" href={`/posts/${post.id}/`}>
+                  <span>{post.data.category}</span>
+                  <strong>{post.data.title}</strong>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </footer>
   </article>
 </BaseLayout>

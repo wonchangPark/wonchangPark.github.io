@@ -1,9 +1,12 @@
 ---
-title: "Outbox/SQS로 가격 재계산 장애를 분리한 이유"
-description: "이벤트 저장과 가격 재계산을 같은 트랜잭션에 묶지 않고 Outbox, after-commit listener, SQS 재처리 경로로 분리한 설계 기록입니다."
+title: "가격 재계산 실패가 이벤트 저장을 막지 않게 분리한 설계"
+description: "이벤트 저장과 가격 재계산을 같은 트랜잭션에 묶지 않고 Outbox, after-commit listener, SQS 재처리 경로로 장애를 격리한 설계 기록입니다."
 pubDate: 2026-06-22
+category: "Reliability"
 tags: ["Outbox", "SQS", "Reliability", "Spring"]
 featured: true
+priority: 2
+proof: "장애 격리와 재처리"
 ---
 
 가격 재계산은 이벤트 도메인에서 자주 놓치기 쉬운 부분입니다. 이벤트가 바뀌면 가격도 바뀌어야 하지만, 가격 계산 자체가 실패했다고 해서 이벤트 저장까지 실패시키는 것이 항상 좋은 선택은 아닙니다.

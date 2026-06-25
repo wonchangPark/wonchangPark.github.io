@@ -1,6 +1,6 @@
-# wonchangPark.github.io
+# Wonchang Park Engineering Blog
 
-Personal backend engineering blog built with Astro and deployed with GitHub Pages.
+Personal backend engineering blog built with Astro and deployed to GitHub Pages.
 
 ## Local Development
 
@@ -17,4 +17,4 @@ npm run build
 
 ## Deployment
 
-Push to `main`. GitHub Actions builds the Astro site and deploys it to GitHub Pages.
+Push to `master`. GitHub Actions builds the Astro site and deploys the generated `dist/` artifact to GitHub Pages.
