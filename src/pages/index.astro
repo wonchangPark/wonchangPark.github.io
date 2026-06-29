@@ -63,21 +63,26 @@ const readingPathPosts = representativePosts
 
     {heroPost && (
       <section class="site-shell feature-section" id="representative-posts">
-        <div class="section-header compact">
+        <div class="section-intro">
           <div>
-            <p class="eyebrow">Portfolio Reading Path</p>
+            <p class="section-label">면접용 읽기 순서</p>
             <h2>대표 기술 글</h2>
             <p>
-              면접에서 바로 설명하기 좋은 설계 경험을 approval, reliability, settlement, migration, infra 순서로 정리했습니다.
+              면접에서 바로 설명하기 좋은 설계 경험을 승인, 장애 격리, 정산, 마이그레이션, 인프라 순서로 정리했습니다.
             </p>
           </div>
-          <a class="text-link" href="/posts/">전체 글 보기</a>
+          <a class="section-link" href="/posts/">전체 글 보기</a>
         </div>
-        <a class="featured-story article-link" href={`/posts/${heroPost.id}/`}>
+        <a
+          class="featured-story article-link"
+          href={`/posts/${heroPost.id}/`}
+          aria-label={`${heroPost.data.title} 글 읽기`}
+        >
           <div>
-            <p class="article-meta">
+            <p class="article-meta featured-meta">
+              <span class="content-type">대표 사례 01</span>
               {heroPost.data.proof && <span class="proof-label">{heroPost.data.proof}</span>}
-              Featured · {heroPost.data.category} · {heroPost.data.author}
+              <span>{heroPost.data.category} · {heroPost.data.author}</span>
             </p>
             <h2>{heroPost.data.title}</h2>
             <p>
@@ -85,24 +90,29 @@ const readingPathPosts = representativePosts
             </p>
           </div>
           <div class="feature-side">
-            <span>{heroPost.data.pubDate.toLocaleDateString("ko-KR", {
-              year: "numeric",
-              month: "long",
-              day: "numeric"
-            })}</span>
-            <strong>Read article</strong>
+            <time datetime={heroPost.data.pubDate.toISOString()}>
+              {heroPost.data.pubDate.toLocaleDateString("ko-KR", {
+                year: "numeric",
+                month: "long",
+                day: "numeric"
+              })}
+            </time>
+            <span class="read-cue" aria-hidden="true">글 읽기</span>
           </div>
         </a>
       </section>
     )}
 
     <section class="site-shell section article-section">
-      <div class="section-header compact">
+      <div class="section-intro">
         <div>
-          <p class="eyebrow">Selected Notes</p>
+          <p class="section-label">보충 설계 노트</p>
           <h2>문제 해결 흐름</h2>
+          <p>
+            대표 사례를 보완하는 장애 격리, 비용 확정, 마이그레이션, 보안 경계 기록입니다.
+          </p>
         </div>
-        <a class="text-link" href="/posts/">모두 보기</a>
+        <a class="section-link" href="/posts/">글 목록 보기</a>
       </div>
       <div class="post-list subtle-list">
         {readingPathPosts.map((post) => <PostCard post={post} />)}

@@ -13,7 +13,7 @@ const formattedDate = post.data.pubDate.toLocaleDateString("ko-KR", {
 });
 ---
 
-<a class="post-card article-link" href={`/posts/${post.id}/`}>
+<a class="post-card article-link" href={`/posts/${post.id}/`} aria-label={`${post.data.title} 글 읽기`}>
   <div class="post-card-main">
     <p class="article-meta">
       {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
@@ -22,7 +22,7 @@ const formattedDate = post.data.pubDate.toLocaleDateString("ko-KR", {
     <h3>{post.data.title}</h3>
     <p>{post.data.description}</p>
   </div>
-  <ul class="tag-list" aria-label="Tags">
+  <ul class="tag-list" aria-label="태그">
     {post.data.tags.slice(0, 2).map((tag) => <li><span class="tag">{tag}</span></li>)}
   </ul>
 </a>
