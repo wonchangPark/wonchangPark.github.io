@@ -17,11 +17,10 @@ const posts = await getRepresentativePosts();
     <section class="site-shell post-list">
       {
         posts.map((post) => (
-          <a class="post-row article-link" href={`/posts/${post.id}/`}>
-            <p class="article-meta">
+          <a class="post-row article-link" href={`/posts/${post.id}/`} aria-label={`${post.data.title} 글 읽기`}>
+            <p class="article-meta post-row-meta">
               {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
-              {post.data.category} · {post.data.author}
-              <br />
+              <span>{post.data.category} · {post.data.author}</span>
               <time datetime={post.data.pubDate.toISOString()}>
                 {post.data.pubDate.toLocaleDateString("ko-KR", {
                   year: "numeric",
@@ -33,7 +32,7 @@ const posts = await getRepresentativePosts();
             <div>
               <h2>{post.data.title}</h2>
               <p>{post.data.description}</p>
-              <ul class="tag-list" aria-label="Tags">
+              <ul class="tag-list" aria-label="태그">
                 {post.data.tags.map((tag) => <li><span class="tag">{tag}</span></li>)}
               </ul>
             </div>
