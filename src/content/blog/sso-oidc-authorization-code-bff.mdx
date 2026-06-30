@@ -1,0 +1,478 @@
+---
+title: "SSO 통합 로그인에서 IdP, authorization code, BFF를 이해하기"
+description: "통합 로그인 설계에서 IdP가 무엇인지, authorization code를 왜 token으로 교환하는지, SPA와 BFF 구조가 보안적으로 어떻게 다른지 정리한 글입니다."
+pubDate: 2026-06-30
+category: "Security"
+tags: ["SSO", "OIDC", "OAuth2", "BFF", "Authentication"]
+featured: true
+priority: 1
+proof: "통합 로그인 설계 정리"
+---
+
+통합 로그인이나 SSO를 논의할 때 가장 자주 헷갈리는 지점은 세 가지입니다.
+
+- IdP가 정확히 무엇인가
+- 로그인 후 `authorization code`를 왜 다시 token으로 교환하는가
+- SPA에서 token을 쓰는 것과 BFF에서 session cookie를 쓰는 것은 무엇이 다른가
+
+처음에는 “로그인에 성공했으면 그냥 token을 바로 주면 되는 것 아닌가?”라는 생각이 자연스럽습니다. 하지만 OIDC 기반 SSO는 일부러 한 단계를 더 둡니다. 사용자의 브라우저를 통해서는 짧게 살아있는 일회용 code만 전달하고, 실제 token은 서버 간 통신으로 받게 합니다.
+
+이 글은 그 흐름을 하나씩 풀어본 기록입니다.
+
+## IdP란 무엇인가
+
+`IdP`는 `Identity Provider`의 약자입니다. 사용자의 신원을 인증해주는 주체입니다.
+
+예를 들면 다음 서비스들이 IdP 역할을 할 수 있습니다.
+
+- Google
+- Apple
+- Kakao
+- Azure AD / Microsoft Entra ID
+- Okta
+- Keycloak
+- 회사 자체 통합 로그인 서버
+
+IdP가 하는 일은 단순히 회원 DB를 갖고 있는 것이 아닙니다. 로그인 화면을 제공하고, 비밀번호나 MFA를 검증하고, 사용자가 누구인지 확인한 뒤, 다른 서비스에게 “이 사용자는 인증된 사용자다”라고 증명해줍니다.
+
+OIDC에서는 보통 이런 값을 발급합니다.
+
+- `authorization code`: token을 받기 위한 일회용 교환권
+- `id_token`: 사용자가 누구인지 나타내는 인증 결과
+- `access_token`: API 접근 권한을 나타내는 token
+- `refresh_token`: access token을 갱신하기 위한 token
+
+## 중앙 플랫폼에서는 IdP가 하나 더 생긴다
+
+통합 플랫폼을 만든다면 Google이나 Apple 로그인을 직접 서비스마다 붙이는 방식은 점점 복잡해집니다.
+
+예를 들어 같은 사용자가 Google과 Apple로 모두 로그인할 수 있다고 해보면, 외부 IdP마다 사용자 식별자가 다릅니다.
+
+```text
+Google user id: google-sub-123
+Apple user id: apple-sub-789
+Email login: user@example.com
+```
+
+이 값들을 서비스 A, 서비스 B, 서비스 C가 각각 직접 다루기 시작하면 계정 병합, 권한 관리, 탈퇴, 감사 로그가 모두 흩어집니다.
+
+그래서 보통은 중앙 통합 로그인 서버를 둡니다.
+
+```text
+Google / Apple / Kakao / 사내 AD
+        ↓
+중앙 통합 로그인 서버
+        ↓
+서비스 A / 서비스 B / 서비스 C
+```
+
+이 구조에서 Google, Apple도 IdP이지만, 우리 중앙 로그인 서버도 IdP입니다. 다만 역할이 다릅니다.
+
+- Google / Apple: 외부 IdP, upstream IdP
+- 중앙 통합 로그인 서버: 내부 IdP, identity broker
+- 서비스 A/B/C: 중앙 로그인 서버를 신뢰하는 client
+
+중앙 로그인 서버는 외부 IdP의 사용자 식별자를 내부 사용자 하나로 묶습니다.
+
+```text
+internal_user_id = user-10001
+
+linked identities:
+- provider: google, provider_user_id: google-sub-123
+- provider: apple, provider_user_id: apple-sub-789
+- provider: email, provider_user_id: user@example.com
+```
+
+그리고 서비스 A/B/C에는 Google ID나 Apple ID를 그대로 넘기기보다, 우리 플랫폼의 내부 사용자 ID를 넘깁니다.
+
+```json
+{
+  "sub": "user-10001",
+  "email": "user@example.com",
+  "iss": "https://login.example.com",
+  "aud": "service-a"
+}
+```
+
+즉 중앙 플랫폼의 로그인 서버는 외부 IdP들을 흡수해서 정리하는 내부 IdP가 됩니다.
+
+## Authorization Code Flow의 큰 흐름
+
+OIDC에서 가장 일반적인 로그인 흐름은 `Authorization Code Flow`입니다. 웹 서비스 기준으로 단순화하면 다음과 같습니다.
+
+```text
+1. 사용자가 서비스 A에 접속한다.
+2. 서비스 A는 로그인되지 않은 사용자를 IdP 로그인 페이지로 redirect한다.
+3. 사용자는 IdP에서 로그인한다.
+4. IdP는 사용자의 브라우저를 서비스 A callback URL로 다시 redirect한다.
+   이때 authorization code를 붙인다.
+5. 서비스 A 서버는 code를 IdP의 token endpoint로 보낸다.
+6. IdP는 서비스 A 서버에 id_token, access_token 등을 발급한다.
+7. 서비스 A는 token을 검증하고 자기 서비스 세션을 만든다.
+```
+
+여기서 중요한 점은 4번입니다. IdP가 서비스 A에게 직접 code를 주는 것처럼 표현하지만, 실제로는 브라우저를 서비스 A callback URL로 이동시키는 것입니다.
+
+```http
+302 Redirect
+Location: https://service-a.example.com/callback?code=abc123&state=xyz
+```
+
+브라우저가 그 URL로 이동하면 서비스 A 서버에 code가 도착합니다.
+
+```text
+브라우저 -> 서비스 A /callback?code=abc123
+```
+
+그 다음 서비스 A 서버가 IdP의 token endpoint에 code를 제출합니다.
+
+```http
+POST https://login.example.com/oauth/token
+
+grant_type=authorization_code
+code=abc123
+client_id=service-a
+client_secret=...
+redirect_uri=https://service-a.example.com/callback
+```
+
+그러면 IdP가 token을 내려줍니다.
+
+```json
+{
+  "id_token": "...",
+  "access_token": "...",
+  "refresh_token": "..."
+}
+```
+
+정리하면 code는 token 자체가 아니라, token을 받기 위한 일회용 교환권입니다.
+
+## 왜 token을 바로 주지 않고 code를 거치나
+
+로그인에 성공했으면 IdP가 바로 `id_token`이나 `access_token`을 주면 더 단순해 보입니다. 하지만 문제는 로그인 완료 후 사용자를 서비스 A로 되돌려보내는 구간이 대개 브라우저를 거친다는 점입니다.
+
+만약 IdP가 token을 URL에 실어 서비스 A로 redirect하면 이렇게 됩니다.
+
+```text
+https://service-a.example.com/callback?id_token=...&access_token=...
+```
+
+이 경우 진짜 token이 브라우저 앞채널에 올라갑니다. URL query에 token이 있으면 여러 곳에 남을 수 있습니다.
+
+- 브라우저 히스토리
+- 서비스 A 접근 로그
+- 프록시나 게이트웨이 로그
+- Referer header
+- 브라우저 확장 프로그램
+- 모바일 WebView나 deep link 처리 과정
+
+그래서 최신 OIDC 흐름에서는 실제 token 대신 짧게 살아있는 일회용 code만 브라우저를 통과시킵니다.
+
+```text
+https://service-a.example.com/callback?code=abc123
+```
+
+code가 탈취되더라도 바로 API 호출에 쓸 수 없습니다. 보통 다음 조건을 만족해야 token으로 교환할 수 있습니다.
+
+- 매우 짧은 시간 안에 사용해야 한다.
+- 한 번만 사용할 수 있다.
+- 등록된 `redirect_uri`와 맞아야 한다.
+- confidential client라면 `client_secret`이 필요하다.
+- public client라면 PKCE의 `code_verifier` 검증이 필요하다.
+
+즉 브라우저를 지나는 값은 공격 가치가 낮은 code로 제한하고, 진짜 token은 서버 간 통신으로 받는 것입니다.
+
+```text
+브라우저 경유:
+IdP -> 브라우저 -> 서비스 A callback
+전달 값: authorization code
+
+서버 간 통신:
+서비스 A 서버 -> IdP token endpoint
+전달 값: code, client 인증 정보, PKCE 검증 값
+응답 값: id_token, access_token
+```
+
+## POST body로 token을 주면 괜찮지 않을까
+
+URL query가 위험하다면 POST body로 token을 보내면 되지 않을까 생각할 수 있습니다.
+
+OIDC에는 실제로 `form_post`라는 response mode가 있습니다. IdP가 브라우저에 HTML form을 내려주고, 브라우저가 자동으로 서비스 A callback에 POST를 보내게 하는 방식입니다.
+
+개념적으로는 이런 형태입니다.
+
+```html
+<form method="post" action="https://service-a.example.com/callback">
+  <input type="hidden" name="id_token" value="..." />
+  <input type="hidden" name="access_token" value="..." />
+</form>
+<script>
+  document.forms[0].submit();
+</script>
+```
+
+이 방식은 URL query보다는 낫습니다. 주소창이나 히스토리에 token이 그대로 남지는 않기 때문입니다.
+
+하지만 token이 여전히 브라우저를 통과한다는 사실은 변하지 않습니다.
+
+- token이 DOM의 hidden input에 들어올 수 있다.
+- 개발자 도구 Network 탭에서 request payload로 볼 수 있다.
+- 브라우저 확장 프로그램이 페이지나 요청에 접근할 수 있다.
+- XSS가 있으면 form 값을 읽을 수 있다.
+- 모바일 WebView나 debugging proxy 환경에서 노출면이 늘어난다.
+
+TLS 관점에서만 보면 브라우저와 서버 사이의 통신은 암호화됩니다. 하지만 TLS는 종단 간 암호화입니다. 브라우저가 통신의 종단점이면 브라우저에서 평문이 됩니다.
+
+그래서 중요한 구분은 “TLS로 보호되는가”가 아니라 “token이 어느 종단점까지 내려오는가”입니다.
+
+```text
+서버 간 token 교환:
+서비스 A 서버와 IdP 서버에서만 token을 본다.
+
+form_post token 전달:
+IdP 서버, 사용자 브라우저, 서비스 A 서버가 token 경로에 들어온다.
+```
+
+Authorization Code Flow는 이 브라우저 앞채널 구간에서 진짜 token을 제거하려는 설계입니다.
+
+## 같은 사용자가 서비스 B로 가면 어떻게 SSO가 되나
+
+서비스 A에서 로그인한 사용자가 서비스 B에 접속하면, 서비스 B는 처음에는 자기 서비스 세션이 없습니다.
+
+그래서 서비스 B도 사용자를 중앙 IdP로 redirect합니다.
+
+```text
+1. 사용자가 서비스 B 접속
+2. 서비스 B에는 아직 session이 없다.
+3. 서비스 B가 IdP로 redirect한다.
+4. IdP는 브라우저의 IdP session cookie를 확인한다.
+5. 이미 로그인되어 있으므로 로그인 화면을 생략한다.
+6. IdP가 서비스 B callback으로 authorization code를 발급한다.
+7. 서비스 B가 code를 token으로 교환한다.
+8. 서비스 B가 자기 서비스 세션을 만든다.
+```
+
+SSO는 서비스 A의 세션을 서비스 B가 직접 읽어서 되는 것이 아닙니다.
+
+```text
+서비스 A 세션: service-a.example.com에서만 사용
+서비스 B 세션: service-b.example.com에서만 사용
+IdP 세션: login.example.com에서 유지
+```
+
+서비스 A와 서비스 B가 같은 IdP를 신뢰하고, 사용자가 그 IdP에 이미 로그인되어 있기 때문에 다시 비밀번호를 입력하지 않는 것입니다.
+
+## 왜 IdP가 서비스 A 서버에 직접 token을 push하지 않나
+
+겉으로 보면 IdP가 서비스 A 서버에 직접 token을 보내면 더 안전해 보일 수 있습니다.
+
+```text
+IdP 서버 -> 서비스 A 서버
+```
+
+하지만 로그인은 최종적으로 사용자의 브라우저 세션과 연결되어야 합니다. 사용자가 서비스 A에서 로그인을 시작할 때, 서비스 A는 보통 임시 로그인 transaction을 만들어둡니다.
+
+```text
+service_a_login_session = pending-123
+state = xyz
+nonce = n123
+code_verifier = secret
+```
+
+그리고 브라우저에는 서비스 A 도메인의 임시 쿠키가 생길 수 있습니다.
+
+```text
+service-a.example.com cookie:
+login_tx=pending-123
+```
+
+IdP가 브라우저를 서비스 A callback으로 돌려보내면 서비스 A는 두 가지를 함께 확인할 수 있습니다.
+
+```text
+URL:
+code=abc123&state=xyz
+
+Cookie:
+login_tx=pending-123
+```
+
+이 조합을 보고 서비스 A는 “이 callback은 방금 우리 서비스에서 로그인 시작했던 그 브라우저 흐름의 결과다”라고 판단할 수 있습니다. 그 다음에 token을 받고, 최종적으로 브라우저에 서비스 A session cookie를 심습니다.
+
+```http
+Set-Cookie: service_a_session=...
+```
+
+반대로 IdP가 서비스 A 서버에 직접 token을 push하면, 그 서버 간 요청에는 사용자의 서비스 A 브라우저 쿠키가 없습니다. 서비스 A 입장에서는 이런 문제가 생깁니다.
+
+```text
+이 token을 어느 브라우저 세션에 연결해야 하지?
+```
+
+결국 별도의 transaction id를 만들고, 브라우저가 다시 서비스 A로 와서 그 transaction과 매칭되는 과정이 필요합니다. 그러면 authorization code flow와 매우 비슷한 구조를 다시 만들게 됩니다.
+
+callback redirect는 token 전달용만이 아니라, 브라우저에서 시작된 로그인 흐름을 서비스 A의 세션과 다시 연결하는 장치입니다.
+
+## SPA에서는 결국 token이 브라우저에 있지 않나
+
+SPA 환경에서는 질문이 하나 더 생깁니다.
+
+브라우저가 API를 직접 호출한다면 TLS는 브라우저에서 풀립니다. 그러면 `access_token`도 브라우저 메모리에 있어야 합니다.
+
+맞습니다. 순수 SPA 구조에서는 보통 브라우저가 token을 가집니다.
+
+```text
+브라우저 SPA
+  -> IdP 로그인
+  -> authorization code + PKCE 처리
+  -> access_token 보관
+  -> API 서버에 Authorization header로 호출
+```
+
+API 호출은 보통 이런 형태가 됩니다.
+
+```http
+GET https://api.example.com/me
+Authorization: Bearer eyJ...
+```
+
+이 구조에서는 XSS가 치명적입니다. access token을 localStorage에 오래 저장하면 위험이 더 커집니다. 그래서 SPA에서는 다음 원칙이 중요합니다.
+
+- Authorization Code Flow + PKCE를 사용한다.
+- access token 만료 시간을 짧게 둔다.
+- 가능하면 localStorage 장기 저장을 피한다.
+- refresh token rotation을 적용한다.
+- CSP와 XSS 방어를 강하게 가져간다.
+- 보안 요구가 높다면 BFF를 고려한다.
+
+## BFF 구조는 무엇인가
+
+`BFF`는 `Backend For Frontend`입니다. SPA 앞에 얇은 백엔드를 두는 구조입니다.
+
+순수 SPA가 이렇게 생겼다면:
+
+```text
+브라우저 SPA
+  -> IdP
+  -> API 서버
+```
+
+BFF 구조는 이렇게 바뀝니다.
+
+```text
+브라우저 SPA
+  -> BFF 서버
+  -> 실제 API 서버 / 마이크로서비스 / 외부 API
+```
+
+BFF는 프론트엔드 전용 gateway에 가깝습니다. 로그인 redirect를 시작하고, code를 token으로 교환하고, access token과 refresh token을 서버 쪽에 보관합니다. 브라우저에는 HttpOnly session cookie만 내려줍니다.
+
+```text
+1. 브라우저가 /login 호출
+2. BFF가 IdP로 redirect
+3. IdP가 /callback?code=... 로 돌려보냄
+4. BFF가 code를 token으로 교환
+5. BFF가 access_token / refresh_token을 서버에 저장
+6. BFF가 브라우저에 HttpOnly session cookie 발급
+7. SPA는 /api/me 같은 BFF endpoint 호출
+8. BFF가 실제 API에 access_token을 붙여 호출
+```
+
+브라우저가 BFF를 호출할 때는 session cookie만 보냅니다.
+
+```http
+GET https://app.example.com/api/me
+Cookie: app_session=abc
+```
+
+BFF가 실제 API 서버를 호출할 때 access token을 붙입니다.
+
+```http
+GET https://api.example.com/users/me
+Authorization: Bearer eyJ...
+```
+
+즉 BFF 구조에서는 access token이 브라우저까지 내려오지 않습니다.
+
+## Session cookie와 access token은 똑같은 것 아닌가
+
+브라우저 입장에서는 둘 다 인증값입니다. 둘 중 하나가 탈취되면 로그인된 요청을 만들 수 있습니다. 그런 의미에서는 비슷합니다.
+
+하지만 위험의 범위와 통제 방식이 다릅니다.
+
+`access_token`은 API가 직접 신뢰하는 권한 증명서입니다.
+
+```text
+Authorization: Bearer access_token
+```
+
+이 값이 새면 token의 audience, scope, 만료 시간 안에서 API를 직접 호출할 수 있습니다.
+
+반면 server session cookie는 보통 서비스 A만 이해하는 opaque 값입니다.
+
+```text
+Cookie: service_a_session=random_session_id
+```
+
+이 값 자체에는 권한 정보가 없습니다. 서비스 A 서버가 session store를 조회해야 의미가 생깁니다. 서버는 이 session을 즉시 폐기할 수 있고, 실제 API용 access token은 서버 안쪽에 숨겨둘 수 있습니다.
+
+물론 access token을 `HttpOnly`, `Secure`, `SameSite=Strict` cookie에 넣으면 session cookie와 비슷한 성질을 갖게 됩니다. 하지만 그 순간 사실상 token을 cookie session처럼 쓰는 구조가 됩니다.
+
+중요한 차이는 다음입니다.
+
+```text
+access_token:
+API 권한 자체를 담은 bearer credential
+
+session cookie:
+서버에 저장된 로그인 상태를 가리키는 opaque handle
+```
+
+BFF의 장점은 브라우저가 access token과 refresh token을 몰라도 된다는 데 있습니다. 브라우저는 session cookie만 가지고, API credential은 서버가 관리합니다.
+
+## JSP 시절 구조로 돌아가는 것인가
+
+BFF는 감각적으로 예전 서버 기반 웹과 닮았습니다.
+
+전통적인 JSP/서버 렌더링 구조는 다음과 같았습니다.
+
+```text
+브라우저 -> 서버
+서버가 인증, 세션, API 호출, HTML 렌더링까지 처리
+브라우저는 session cookie만 가짐
+```
+
+BFF + SPA는 다음과 같습니다.
+
+```text
+브라우저 -> BFF
+BFF가 인증, 세션, API 중계를 처리
+화면 렌더링은 브라우저 SPA가 처리
+브라우저는 session cookie만 가짐
+```
+
+즉 인증과 session 관리 관점에서는 서버 기반 웹의 장점을 다시 가져오고, UI 렌더링은 SPA 방식을 유지하는 구조입니다.
+
+BFF는 그냥 옛날 방식으로 회귀한 것이 아니라, 브라우저에 민감한 token을 두지 않기 위해 프론트엔드 앞에 둔 보안 완충지대라고 보는 편이 맞습니다.
+
+## 정리
+
+SSO와 OIDC를 이해할 때 핵심은 “누가 어떤 token을 어디까지 들고 가는가”입니다.
+
+- IdP는 사용자의 신원을 인증해주는 주체다.
+- 중앙 통합 로그인 서버는 Google/Apple 같은 외부 IdP를 사용하면서, 서비스 A/B/C에게는 내부 IdP 역할을 한다.
+- authorization code는 token이 아니라 token을 받기 위한 일회용 교환권이다.
+- 브라우저 redirect 구간에는 진짜 token 대신 code만 전달하는 것이 안전하다.
+- token을 URL query에 싣는 것은 위험하고, form_post도 브라우저 앞채널을 통과한다는 한계가 있다.
+- 서비스 B에서 SSO가 되는 이유는 서비스 A 세션을 공유해서가 아니라, IdP 세션이 이미 있기 때문이다.
+- 순수 SPA는 access token을 브라우저가 가질 수밖에 없으므로 XSS와 token storage 전략이 중요하다.
+- BFF는 access token과 refresh token을 서버에 숨기고, 브라우저에는 HttpOnly session cookie만 주는 구조다.
+
+결국 Authorization Code Flow와 BFF의 방향은 같습니다.
+
+```text
+브라우저에 민감한 값을 덜 내려보내고,
+진짜 권한 credential은 가능한 서버 쪽에서 다룬다.
+```
+
+이 원칙을 기준으로 보면 SSO 설계 논의에서 어떤 지점이 보안 경계이고, 어떤 선택이 단순함과 안전성 사이의 trade-off인지 훨씬 선명하게 볼 수 있습니다.
