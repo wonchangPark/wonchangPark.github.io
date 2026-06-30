@@ -83,7 +83,7 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
             <p class="section-label">Tech Stack</p>
             <h2 id="category-filter-title">기술 스택</h2>
           </div>
-          <button class="filter-reset" type="button" data-filter-reset disabled>초기화</button>
+          <button class="filter-reset is-idle" type="button" data-filter-reset>초기화</button>
         </div>
         <ul class="category-filter-list" aria-label="기술 스택 필터">
           {
@@ -153,7 +153,7 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
         }
 
         if (resetButton) {
-          resetButton.disabled = selected.size === 0;
+          resetButton.classList.toggle("is-idle", selected.size === 0);
         }
 
         if (writeHistory && hasChanged) {

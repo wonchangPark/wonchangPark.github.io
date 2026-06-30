@@ -713,11 +713,10 @@ h3 {
   color: var(--blue-strong);
 }
 
-.filter-reset:disabled {
+.filter-reset.is-idle {
   border-color: transparent;
   background: transparent;
   color: #9aa5b1;
-  cursor: default;
 }
 
 .category-filter-list {
