@@ -3,13 +3,28 @@ import BaseLayout from "@layouts/BaseLayout.astro";
 import { getRepresentativePosts } from "@lib/posts";
 
 const posts = await getRepresentativePosts();
-const categoryCounts = posts.reduce((counts, post) => {
-  const count = counts.get(post.data.category) ?? 0;
-  counts.set(post.data.category, count + 1);
+const techStackOrder = [
+  "Java / Spring",
+  "PostgreSQL / JPA",
+  "AWS / Infra",
+  "Security / Auth",
+  "Messaging / Async"
+];
+const techStackCounts = posts.reduce((counts, post) => {
+  post.data.techStacks.forEach((techStack) => {
+    const count = counts.get(techStack) ?? 0;
+    counts.set(techStack, count + 1);
+  });
 
   return counts;
 }, new Map<string, number>());
-const categories = Array.from(categoryCounts, ([name, count]) => ({ name, count }));
+const orderedTechStacks = techStackOrder
+  .map((name) => ({ name, count: techStackCounts.get(name) ?? 0 }))
+  .filter((techStack) => techStack.count > 0);
+const extraTechStacks = Array.from(techStackCounts, ([name, count]) => ({ name, count }))
+  .filter((techStack) => !techStackOrder.includes(techStack.name))
+  .sort((a, b) => a.name.localeCompare(b.name));
+const techStacks = [...orderedTechStacks, ...extraTechStacks];
 ---
 
 <BaseLayout title="Posts - 박원창" description="백엔드 설계와 운영 안정성에 대한 글 목록">
@@ -37,7 +52,7 @@ const categories = Array.from(categoryCounts, ([name, count]) => ({ name, count 
                 class="post-row article-link"
                 href={`/posts/${post.id}/`}
                 aria-label={`${post.data.title} 글 읽기`}
-                data-post-category={post.data.category}
+                data-post-tech-stacks={post.data.techStacks.join("|")}
               >
                 <p class="article-meta post-row-meta">
                   {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
@@ -65,36 +80,24 @@ const categories = Array.from(categoryCounts, ([name, count]) => ({ name, count 
       <aside class="category-filter" aria-labelledby="category-filter-title">
         <div class="category-filter-head">
           <div>
-            <p class="section-label">Category</p>
-            <h2 id="category-filter-title">기술 카테고리</h2>
+            <p class="section-label">Tech Stack</p>
+            <h2 id="category-filter-title">기술 스택</h2>
           </div>
-          <button class="filter-reset" type="button" data-filter-reset>초기화</button>
+          <button class="filter-reset" type="button" data-filter-reset disabled>초기화</button>
         </div>
-        <ul class="category-filter-list" aria-label="기술 카테고리 필터">
-          <li>
-            <button
-              class="category-filter-option is-active"
-              type="button"
-              data-filter-value="all"
-              aria-pressed="true"
-            >
-              <span class="filter-box" aria-hidden="true"></span>
-              <span>전체</span>
-              <span class="filter-count">{posts.length}</span>
-            </button>
-          </li>
+        <ul class="category-filter-list" aria-label="기술 스택 필터">
           {
-            categories.map((category) => (
+            techStacks.map((techStack) => (
               <li>
                 <button
                   class="category-filter-option"
                   type="button"
-                  data-filter-value={category.name}
+                  data-filter-value={techStack.name}
                   aria-pressed="false"
                 >
                   <span class="filter-box" aria-hidden="true"></span>
-                  <span>{category.name}</span>
-                  <span class="filter-count">{category.count}</span>
+                  <span>{techStack.name}</span>
+                  <span class="filter-count">{techStack.count}</span>
                 </button>
               </li>
             ))
@@ -107,64 +110,92 @@ const categories = Array.from(categoryCounts, ([name, count]) => ({ name, count 
     const postBrowser = document.querySelector("[data-post-browser]");
 
     if (postBrowser) {
-      const allValue = "all";
-      const rows = Array.from(postBrowser.querySelectorAll("[data-post-category]"));
+      const rows = Array.from(postBrowser.querySelectorAll("[data-post-tech-stacks]"));
       const controls = Array.from(postBrowser.querySelectorAll("[data-filter-value]"));
       const countLabel = postBrowser.querySelector("[data-post-count]");
+      const resetButton = postBrowser.querySelector<HTMLButtonElement>("[data-filter-reset]");
       const filterValues = new Set<string>(
         controls
           .map((control) => control.getAttribute("data-filter-value"))
           .filter((value): value is string => value !== null)
       );
-      let activeCategory = allValue;
+      let activeTechStacks = new Set<string>();
 
-      const setCategory = (category: string | null, writeHistory = true) => {
-        const nextCategory = category && filterValues.has(category) ? category : allValue;
+      const getRowTechStacks = (row: Element) =>
+        row.getAttribute("data-post-tech-stacks")?.split("|").filter(Boolean) ?? [];
+
+      const setSelectedTechStacks = (techStacks: string[], writeHistory = true) => {
+        const selectedValues = techStacks.filter((techStack) => filterValues.has(techStack));
+        const selected = new Set(selectedValues);
+        const hasChanged =
+          selected.size !== activeTechStacks.size ||
+          selectedValues.some((techStack) => !activeTechStacks.has(techStack));
         let visibleCount = 0;
 
         rows.forEach((row) => {
+          const rowTechStacks = getRowTechStacks(row);
           const shouldShow =
-            nextCategory === allValue || row.getAttribute("data-post-category") === nextCategory;
+            selected.size === 0 || rowTechStacks.some((techStack) => selected.has(techStack));
           row.toggleAttribute("hidden", !shouldShow);
           if (shouldShow) visibleCount += 1;
         });
 
         controls.forEach((control) => {
-          const isActive = control.getAttribute("data-filter-value") === nextCategory;
+          const value = control.getAttribute("data-filter-value");
+          const isActive = value !== null && selected.has(value);
           control.classList.toggle("is-active", isActive);
           control.setAttribute("aria-pressed", String(isActive));
         });
 
         if (countLabel) {
           countLabel.textContent =
-            nextCategory === allValue ? `${rows.length}개 글` : `${nextCategory} ${visibleCount}개 글`;
+            selected.size === 0 ? `${rows.length}개 글` : `${visibleCount}개 글 · ${selected.size}개 기술 선택`;
         }
 
-        if (writeHistory && activeCategory !== nextCategory) {
+        if (resetButton) {
+          resetButton.disabled = selected.size === 0;
+        }
+
+        if (writeHistory && hasChanged) {
           const url = new URL(window.location.href);
-          if (nextCategory === allValue) {
-            url.searchParams.delete("category");
-          } else {
-            url.searchParams.set("category", nextCategory);
-          }
-          window.history.pushState({ category: nextCategory }, "", url);
+          url.searchParams.delete("category");
+          url.searchParams.delete("tech");
+          selectedValues.forEach((techStack) => url.searchParams.append("tech", techStack));
+          window.history.pushState({ tech: selectedValues }, "", url);
         }
 
-        activeCategory = nextCategory;
+        activeTechStacks = selected;
       };
 
-      const currentParams = new URLSearchParams(window.location.search);
-      setCategory(currentParams.get("category") ?? allValue, false);
+      const readSelectedTechStacksFromUrl = () => {
+        const params = new URLSearchParams(window.location.search);
+        return params.getAll("tech");
+      };
+
+      setSelectedTechStacks(readSelectedTechStacksFromUrl(), false);
 
       controls.forEach((control) => {
         control.addEventListener("click", () => {
-          setCategory(control.getAttribute("data-filter-value") ?? allValue);
+          const value = control.getAttribute("data-filter-value");
+          if (!value) return;
+
+          const nextSelection = new Set(activeTechStacks);
+          if (nextSelection.has(value)) {
+            nextSelection.delete(value);
+          } else {
+            nextSelection.add(value);
+          }
+
+          setSelectedTechStacks(Array.from(nextSelection));
         });
       });
 
+      resetButton?.addEventListener("click", () => {
+        setSelectedTechStacks([]);
+      });
+
       window.addEventListener("popstate", () => {
-        const params = new URLSearchParams(window.location.search);
-        setCategory(params.get("category") ?? allValue, false);
+        setSelectedTechStacks(readSelectedTechStacksFromUrl(), false);
       });
     }
   </script>
