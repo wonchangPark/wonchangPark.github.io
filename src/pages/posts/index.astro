@@ -3,6 +3,13 @@ import BaseLayout from "@layouts/BaseLayout.astro";
 import { getRepresentativePosts } from "@lib/posts";
 
 const posts = await getRepresentativePosts();
+const categoryCounts = posts.reduce((counts, post) => {
+  const count = counts.get(post.data.category) ?? 0;
+  counts.set(post.data.category, count + 1);
+
+  return counts;
+}, new Map<string, number>());
+const categories = Array.from(categoryCounts, ([name, count]) => ({ name, count }));
 ---
 
 <BaseLayout title="Posts - 박원창" description="백엔드 설계와 운영 안정성에 대한 글 목록">
@@ -14,31 +21,151 @@ const posts = await getRepresentativePosts();
         실제 회사 코드를 공개하지 않고, 문제와 설계 판단을 일반화해 정리한 백엔드 엔지니어링 노트입니다.
       </p>
     </section>
-    <section class="site-shell post-list">
-      {
-        posts.map((post) => (
-          <a class="post-row article-link" href={`/posts/${post.id}/`} aria-label={`${post.data.title} 글 읽기`}>
-            <p class="article-meta post-row-meta">
-              {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
-              <span>{post.data.category} · {post.data.author}</span>
-              <time datetime={post.data.pubDate.toISOString()}>
-                {post.data.pubDate.toLocaleDateString("ko-KR", {
-                  year: "numeric",
-                  month: "short",
-                  day: "numeric"
-                })}
-              </time>
-            </p>
-            <div>
-              <h2>{post.data.title}</h2>
-              <p>{post.data.description}</p>
-              <ul class="tag-list" aria-label="태그">
-                {post.data.tags.map((tag) => <li><span class="tag">{tag}</span></li>)}
-              </ul>
-            </div>
-          </a>
-        ))
-      }
+    <section class="site-shell post-browser" data-post-browser>
+      <div class="post-stream">
+        <div class="post-list-head">
+          <div>
+            <p class="section-label">전체 글</p>
+            <h2>문제별 기술 기록</h2>
+          </div>
+          <p class="post-count" data-post-count>{posts.length}개 글</p>
+        </div>
+        <div class="post-list" data-post-list>
+          {
+            posts.map((post) => (
+              <a
+                class="post-row article-link"
+                href={`/posts/${post.id}/`}
+                aria-label={`${post.data.title} 글 읽기`}
+                data-post-category={post.data.category}
+              >
+                <p class="article-meta post-row-meta">
+                  {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
+                  <span>{post.data.category} · {post.data.author}</span>
+                  <time datetime={post.data.pubDate.toISOString()}>
+                    {post.data.pubDate.toLocaleDateString("ko-KR", {
+                      year: "numeric",
+                      month: "short",
+                      day: "numeric"
+                    })}
+                  </time>
+                </p>
+                <div>
+                  <h2>{post.data.title}</h2>
+                  <p>{post.data.description}</p>
+                  <ul class="tag-list" aria-label="태그">
+                    {post.data.tags.map((tag) => <li><span class="tag">{tag}</span></li>)}
+                  </ul>
+                </div>
+              </a>
+            ))
+          }
+        </div>
+      </div>
+      <aside class="category-filter" aria-labelledby="category-filter-title">
+        <div class="category-filter-head">
+          <div>
+            <p class="section-label">Category</p>
+            <h2 id="category-filter-title">기술 카테고리</h2>
+          </div>
+          <button class="filter-reset" type="button" data-filter-reset>초기화</button>
+        </div>
+        <ul class="category-filter-list" aria-label="기술 카테고리 필터">
+          <li>
+            <button
+              class="category-filter-option is-active"
+              type="button"
+              data-filter-value="all"
+              aria-pressed="true"
+            >
+              <span class="filter-box" aria-hidden="true"></span>
+              <span>전체</span>
+              <span class="filter-count">{posts.length}</span>
+            </button>
+          </li>
+          {
+            categories.map((category) => (
+              <li>
+                <button
+                  class="category-filter-option"
+                  type="button"
+                  data-filter-value={category.name}
+                  aria-pressed="false"
+                >
+                  <span class="filter-box" aria-hidden="true"></span>
+                  <span>{category.name}</span>
+                  <span class="filter-count">{category.count}</span>
+                </button>
+              </li>
+            ))
+          }
+        </ul>
+      </aside>
     </section>
   </main>
+  <script>
+    const postBrowser = document.querySelector("[data-post-browser]");
+
+    if (postBrowser) {
+      const allValue = "all";
+      const rows = Array.from(postBrowser.querySelectorAll("[data-post-category]"));
+      const controls = Array.from(postBrowser.querySelectorAll("[data-filter-value]"));
+      const countLabel = postBrowser.querySelector("[data-post-count]");
+      const filterValues = new Set<string>(
+        controls
+          .map((control) => control.getAttribute("data-filter-value"))
+          .filter((value): value is string => value !== null)
+      );
+      let activeCategory = allValue;
+
+      const setCategory = (category: string | null, writeHistory = true) => {
+        const nextCategory = category && filterValues.has(category) ? category : allValue;
+        let visibleCount = 0;
+
+        rows.forEach((row) => {
+          const shouldShow =
+            nextCategory === allValue || row.getAttribute("data-post-category") === nextCategory;
+          row.toggleAttribute("hidden", !shouldShow);
+          if (shouldShow) visibleCount += 1;
+        });
+
+        controls.forEach((control) => {
+          const isActive = control.getAttribute("data-filter-value") === nextCategory;
+          control.classList.toggle("is-active", isActive);
+          control.setAttribute("aria-pressed", String(isActive));
+        });
+
+        if (countLabel) {
+          countLabel.textContent =
+            nextCategory === allValue ? `${rows.length}개 글` : `${nextCategory} ${visibleCount}개 글`;
+        }
+
+        if (writeHistory && activeCategory !== nextCategory) {
+          const url = new URL(window.location.href);
+          if (nextCategory === allValue) {
+            url.searchParams.delete("category");
+          } else {
+            url.searchParams.set("category", nextCategory);
+          }
+          window.history.pushState({ category: nextCategory }, "", url);
+        }
+
+        activeCategory = nextCategory;
+      };
+
+      const currentParams = new URLSearchParams(window.location.search);
+      setCategory(currentParams.get("category") ?? allValue, false);
+
+      controls.forEach((control) => {
+        control.addEventListener("click", () => {
+          setCategory(control.getAttribute("data-filter-value") ?? allValue);
+        });
+      });
+
+      window.addEventListener("popstate", () => {
+        const params = new URLSearchParams(window.location.search);
+        setCategory(params.get("category") ?? allValue, false);
+      });
+    }
+  </script>
 </BaseLayout>
