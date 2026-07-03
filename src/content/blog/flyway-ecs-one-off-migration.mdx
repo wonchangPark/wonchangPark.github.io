@@ -1,0 +1,381 @@
+---
+title: "init-db에서 Flyway와 ECS one-off migration으로 넘어간 기록"
+description: "운영 직전 init-db 기반 초기화 흐름을 Flyway baseline, reference data migration, ECS one-off task, 병원 온보딩 API로 나누며 겪은 문제와 해결을 정리한 기록입니다."
+pubDate: 2026-07-03
+category: "Migration / Infra"
+tags: ["Flyway", "PostgreSQL", "ECS", "Migration"]
+techStacks: ["Java / Spring", "PostgreSQL / Flyway", "AWS / ECS"]
+featured: true
+priority: 2
+proof: "운영 전 DB migration 전환"
+---
+
+운영 가능한 시점이 가까워질수록 데이터베이스 초기화 방식은 단순한 개발 편의 기능이 아니라 운영 경계가 됩니다.
+
+처음에는 `init-db` 아래 SQL을 순서대로 실행해 schema와 seed를 맞췄습니다. 개발 중에는 충분히 빠르고 직관적이었습니다. 하지만 파일이 100개를 훌쩍 넘기 시작하고, 오래된 entity 기준의 SQL과 현재 운영 데이터가 섞이면서 더 이상 “항상 실행되는 초기화 폴더”로 두기 어려워졌습니다.
+
+그래서 운영 직전에 Flyway를 도입했습니다. 이 글은 단순히 Flyway를 켰다는 기록이 아니라, 무엇을 migration으로 넣고 무엇을 운영 API나 one-off task로 분리했는지에 대한 판단 기록입니다.
+
+## 왜 이 시점에 Flyway였나
+
+`init-db` 방식의 가장 큰 장점은 단순함입니다.
+
+```text
+SQL files
+  -> psql로 순서대로 실행
+  -> local DB 초기화
+  -> schema와 sample data 준비
+```
+
+하지만 운영 DB가 생기는 순간 이 단순함은 위험이 됩니다.
+
+- 어떤 SQL이 이미 반영됐는지 DB 안에 이력이 남지 않는다.
+- local sample data와 운영 reference data가 같은 폴더에 섞이기 쉽다.
+- 운영 DB에 같은 초기화 SQL을 다시 실행할 수 없다.
+- 파일이 많아질수록 현재 schema의 출처를 알기 어렵다.
+- 오래된 entity 기준의 seed가 살아남아 최신 도메인과 어긋난다.
+
+운영에서는 “지금 DB가 어떤 버전인가”를 데이터베이스 스스로 알고 있어야 합니다. Flyway는 이 이력을 `flyway_schema_history`에 남깁니다. 이력이 생기면 배포 시점마다 어떤 migration이 실행됐는지 확인할 수 있고, 실패 지점도 분명해집니다.
+
+## 앱 시작 시 자동 실행하지 않은 이유
+
+Flyway를 Spring Boot에 붙이면 앱 시작 시 자동으로 migration을 실행할 수 있습니다. local 개발에서는 이 방식이 편합니다. 하지만 stage, prod에서는 앱 시작과 migration을 분리했습니다.
+
+선택한 구조는 다음과 같습니다.
+
+```text
+deploy script
+  -> build/push backend image
+  -> ECS one-off migration task 실행
+  -> migration 성공 확인
+  -> ECS service rollout
+```
+
+운영 배포에서 migration을 앱 시작에 묶지 않은 이유는 권한과 실패 범위를 분리하기 위해서입니다.
+
+앱 런타임 계정은 보통 `SELECT`, `INSERT`, `UPDATE`, `DELETE` 정도만 필요합니다. 반면 Flyway는 `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, 때로는 `DROP` 같은 DDL 권한이 필요합니다. 앱 계정에 DDL 권한을 주면 런타임 버그나 credential 유출의 피해 범위가 커집니다.
+
+그래서 DB 계정을 분리했습니다.
+
+```text
+settlement_migrator
+  - Flyway migration 전용
+  - DDL 권한
+  - ECS one-off migration task에서만 사용
+
+settlement_app
+  - 애플리케이션 런타임 전용
+  - DML 권한
+  - ECS service task에서 사용
+
+settlement_readonly
+  - 운영 조회용
+
+settlement_admin
+  - 제한된 운영 작업용
+```
+
+이렇게 하면 migration 실패는 service rollout 전에 멈출 수 있습니다. 반대로 앱 task가 여러 개 동시에 뜨면서 같은 migration을 경쟁적으로 실행하는 상황도 피할 수 있습니다.
+
+## 인프라에서 고민한 지점
+
+Flyway 도입은 backend 코드만의 일이 아니었습니다. 실제로 더 오래 고민한 부분은 “migration을 어디서, 어떤 권한으로, 어떤 네트워크 안에서 실행할 것인가”였습니다.
+
+처음 선택지는 크게 네 가지였습니다.
+
+| 실행 위치 | 장점 | 부담 |
+| --- | --- | --- |
+| 앱 시작 시 자동 실행 | 설정이 단순하고 Spring Boot와 잘 맞는다 | 앱 런타임 계정에 DDL 권한이 필요하고, 여러 task가 동시에 migration을 시도할 수 있다 |
+| 배포 runner에서 직접 실행 | 배포 스크립트가 단순하다 | private RDS에 접근하려면 runner 네트워크를 열어야 한다 |
+| CodeBuild in VPC | VPC 내부에서 실행 가능하고 CI/CD와 붙이기 좋다 | 별도 project, IAM, image pull 경로를 관리해야 한다 |
+| ECS one-off task | 실제 앱과 같은 VPC, subnet, security group, image, log 경로를 재사용할 수 있다 | service task definition을 복제하면서 migration 전용 환경 변수를 정확히 덮어써야 한다 |
+
+이 시스템에서는 ECS one-off task를 선택했습니다. RDS는 private network 안에 있고, 앱도 ECS에서 실행됩니다. 그러면 migration도 같은 네트워크 경계 안에서 실행하는 편이 자연스러웠습니다.
+
+```text
+GitHub Actions or local operator
+  -> deploy_image.sh
+  -> AWS ECS run-task
+  -> private subnet 안에서 migration task 실행
+  -> private RDS 접속
+```
+
+이 구조에서는 RDS를 public으로 열 필요가 없습니다. 배포를 실행하는 사람이나 runner가 DB에 직접 붙는 것도 아닙니다. 배포 스크립트는 AWS API를 통해 ECS task를 시작하고, 실제 DB 접속은 VPC 안의 migration task가 합니다.
+
+Terraform과 backend의 책임도 나눴습니다.
+
+```text
+settlement-terraform
+  - RDS
+  - ECS cluster/service/task definition
+  - IAM role/policy
+  - Secrets Manager secret shell
+  - deployment script
+
+settlement-backend
+  - Flyway migration SQL
+  - local seed
+  - migration-only application mode
+  - admin/onboarding API
+```
+
+처음에는 migration 실행 스크립트까지 Terraform에서 강하게 관리할 수도 있었습니다. 하지만 schema와 reference data는 backend 버전과 함께 움직여야 합니다. Terraform repo가 SQL 내용을 알기 시작하면 schema 변경 때마다 두 repo 사이에 drift가 생기기 쉽습니다.
+
+그래서 Terraform은 실행 환경과 권한의 그릇을 만들고, backend는 migration의 내용을 소유하게 했습니다. 배포 스크립트는 그 사이에서 “현재 서비스 task definition을 복제해 migration task를 한 번 실행한다”는 orchestration만 담당합니다.
+
+여기서 신경 쓴 인프라 포인트는 다음이었습니다.
+
+- migration task는 app task와 같은 private subnet/security group을 사용한다.
+- migration task만 `settlement_migrator` secret을 읽는다.
+- app service task는 `settlement_app` secret만 사용한다.
+- migration task는 CloudWatch Logs로 결과를 남긴다.
+- private subnet에서 ECR, Secrets Manager, CloudWatch Logs에 접근할 NAT 또는 VPC endpoint 경로가 필요하다.
+- service task definition을 복제하되 scheduler는 반드시 꺼야 한다.
+
+특히 마지막 항목이 중요했습니다. one-off task는 편하지만, service task definition을 그대로 복제하면 앱의 일반 runtime 기능도 같이 올라옵니다. 그래서 migration task에서는 다음 값을 명시적으로 덮어썼습니다.
+
+```text
+APP_MIGRATION_ONLY=true
+SPRING_FLYWAY_ENABLED=true
+SPRING_MAIN_WEB_APPLICATION_TYPE=none
+APP_SCHEDULING_ENABLED=false
+```
+
+이렇게 해야 migration task가 web server나 scheduler가 아니라 “DB migration을 수행하고 종료되는 task”가 됩니다.
+
+## init-db를 그대로 옮기지 않았다
+
+처음 고민은 `init-db` 아래 140개가 넘는 SQL을 Flyway migration으로 그대로 옮길 것인가였습니다. 결론은 아니었습니다.
+
+이미 운영 전이고, Flyway history가 시작되지 않은 상태라면 과거의 모든 중간 단계를 보존할 필요는 없었습니다. 중요한 것은 “현재 운영 가능한 schema와 공통 reference data”입니다.
+
+그래서 migration은 크게 두 개로 시작했습니다.
+
+```text
+src/main/resources/db/migration/
+  V001__baseline_schema.sql
+  V002__reference_data.sql
+```
+
+`V001`은 현재 schema의 clean baseline입니다. 오래된 entity를 거쳐온 중간 SQL 파일들을 모두 history로 보존하는 대신, 지금 필요한 최종 schema를 하나의 baseline으로 만들었습니다.
+
+`V002`는 모든 환경에서 같은 의미를 갖는 reference data입니다. 예를 들면 역할, 권한, 계정과목 템플릿, 표시계정 템플릿, 매핑 템플릿처럼 신규 병원 생성 시 공통으로 복사되는 기준 데이터입니다.
+
+반대로 다음 데이터는 공통 migration에서 제외했습니다.
+
+- local sample hospital
+- local sample user
+- 병원별 CMS 계좌
+- 병원별 계정 라우팅 룰
+- 병원별 급여 출금계좌 설정
+- 실제 platform admin 또는 hospital admin 계정
+
+이 데이터들은 환경이나 병원에 따라 값이 달라집니다. Flyway migration은 모든 환경에 같은 의미로 적용되는 변경에 가장 잘 맞습니다. 환경마다 달라지는 운영 데이터까지 migration으로 넣기 시작하면, migration이 배포 이력이 아니라 운영 조작 스크립트가 됩니다.
+
+## local seed와 운영 seed를 분리했다
+
+local 개발에는 sample user와 sample hospital이 필요합니다. 하지만 운영 JAR 안에 local seed가 들어가면 실수로 stage나 prod에 적용될 위험이 있습니다.
+
+그래서 위치를 분리했습니다.
+
+```text
+src/main/resources/db/migration/
+  V001__baseline_schema.sql
+  V002__reference_data.sql
+
+src/main/resources/db/seed/local/
+  R__local_seed.sql
+```
+
+local profile에서는 `db/migration`과 `db/seed/local`을 같이 읽습니다. dev, stag, prod profile에서는 Flyway location을 `classpath:db/migration`으로 고정했습니다. 그리고 deployable boot JAR에서는 `db/seed/**`를 제외했습니다.
+
+이 조합의 목적은 명확합니다.
+
+- local 개발자는 sample data를 쉽게 쓴다.
+- 운영 ECS image에는 local seed 파일이 들어가지 않는다.
+- 환경 변수 하나를 잘못 넣어도 local seed가 운영 DB에 적용되지 않는다.
+
+seed 문제는 “누가 실수하겠어”로 넘기기 쉽습니다. 하지만 sample user와 password hash가 들어 있는 seed가 운영 DB에 들어가는 사고는 막을 수 있으면 구조적으로 막아야 합니다.
+
+## template data 회귀 문제
+
+가장 조심해야 했던 부분은 reference data였습니다.
+
+계정과목과 표시계정 템플릿은 운영 로직의 기준이 됩니다. 그런데 처음 만든 `V002` snapshot에는 예전 용어가 섞여 있었습니다.
+
+예를 들면 최신 데이터는 다음 용어를 써야 했습니다.
+
+```text
+인건비 (고정)
+매출원가(병원사용분)
+서비스이용료
+봉직의 보수
+솔루션비
+```
+
+하지만 snapshot에는 오래된 표현인 `테크거래`, `테크솔루션`, `원장단보수` 같은 값이 남아 있었습니다. 또 `정의 필요`라는 root 계정이 남아 있었고, `선급금-직원급여`, `선급금-4대보험`의 부모 관계도 최신 구조와 맞지 않았습니다.
+
+이 문제는 단순 typo가 아닙니다. 신규 병원을 만들 때 template을 복사하면 잘못된 계정 구조가 병원 데이터로 퍼집니다. 한 번 병원별 데이터로 퍼진 뒤에는 template만 고쳐도 이미 복사된 병원 데이터는 자동으로 고쳐지지 않습니다.
+
+그래서 `V002`를 최신 운영 데이터 기준으로 다시 snapshot했습니다.
+
+- 오래된 표시계정 용어 제거
+- `정의 필요` root 제거
+- `선급금-직원급여`, `선급금-4대보험`을 `인건비` 하위로 이동
+- 사용하지 않는 `BUFFER_INSURANCE` system mapping 제거
+- local seed가 template 데이터를 중복 보유하지 않고 active template을 복사하도록 정리
+
+여기서 배운 점은 reference data migration도 코드만큼 리뷰해야 한다는 것입니다. schema가 맞아도 reference data가 틀리면 서비스는 조용히 잘못된 상태로 시작합니다.
+
+## 병원별 데이터는 onboarding API로 뺐다
+
+계정과목 template은 공통 데이터지만, 실제 병원에 복사된 계정과목과 라우팅 룰은 병원별 데이터입니다.
+
+특히 `account_subject_account_routing_rules`는 병원별 CMS 계좌와 표시계정 매핑에 의존합니다. 신규 병원이 생기면 해당 병원의 CMS 계좌가 먼저 등록되어야 하고, 그 뒤에 계정 라우팅 룰을 만들 수 있습니다.
+
+급여 출금계좌 설정도 마찬가지입니다.
+
+```text
+payroll_transfer_account_settings
+  - hospital_id
+  - target_type
+  - bank_account_mapping_id
+  - transfer_day
+```
+
+이 값은 병원마다 다릅니다. 어느 계좌에서 급여를 이체할지, 소득세는 몇 일에 이체할지 같은 정책은 공통 migration에 넣을 수 없습니다.
+
+그래서 병원 온보딩 순서를 명시했습니다.
+
+```text
+1. 병원 생성
+2. 기본 template을 병원 데이터로 복사
+3. 병원 CMS 계좌 등록
+4. account routing rules 초기화 API 호출
+5. payroll transfer account settings upsert API 호출
+6. hospital admin 계정 provision
+```
+
+API도 이 흐름에 맞췄습니다.
+
+```text
+POST /api/admin/hospitals/{hospitalId}/account-routing-rules/initialize
+POST /api/admin/hospitals/{hospitalId}/payroll-transfer-account-settings
+```
+
+이 방식의 장점은 병원이 늘어날 때마다 같은 onboarding flow를 반복할 수 있다는 점입니다. Flyway는 공통 구조와 기준 데이터까지만 책임지고, 병원별 운영 데이터는 관리 API와 runbook이 책임집니다.
+
+## 첫 관리자 계정은 migration이 아니라 provision으로
+
+회원가입 API가 열려 있지 않은 서비스라면 첫 관리자 계정이 필요합니다. 하지만 이 역시 Flyway common seed에 넣지 않았습니다.
+
+운영 관리자 계정은 환경마다 다르고, 병원마다 다릅니다. password도 migration 파일에 들어가면 안 됩니다. 그래서 admin provision one-off task로 분리했습니다.
+
+```text
+provision_admin.sh
+  -> ECS one-off task 실행
+  -> PLATFORM_ADMIN 또는 HOSPITAL_ADMIN 생성
+  -> 랜덤 초기 비밀번호 생성
+  -> password_change_required=true
+  -> 초기 비밀번호를 로그에 한 번만 출력
+```
+
+메일 시스템이 아직 없다면 초기 비밀번호를 안전하게 전달하고, 첫 로그인 후 비밀번호 변경을 강제하는 방식이 현실적입니다. 대신 이 흐름을 만들 때 몇 가지 보강이 필요했습니다.
+
+- 비밀번호 정책을 12-64자, 대문자/소문자/숫자/특수문자 필수로 통일
+- 직접 지정한 provision password도 같은 정책으로 검증
+- 비밀번호 변경 성공 시 기존 세션 전체 무효화
+- refresh token cookie 제거
+- password change audit 기록
+- `passwordChangeRequired`를 매 요청 DB 조회가 아니라 session record에서 읽도록 변경
+- soft-deleted hospital에는 admin을 만들 수 없도록 active hospital 조회로 변경
+
+첫 관리자 계정은 작아 보이지만 운영 보안의 시작점입니다. 특히 “임시 비밀번호를 나중에 바꾸면 되겠지”가 아니라, 시스템이 첫 로그인 후 변경을 강제해야 합니다.
+
+## 기존 RDS는 baseline으로 승계한다
+
+Flyway를 도입한다고 해서 기존 RDS 데이터가 사라지지는 않습니다. Flyway가 자동으로 table을 drop하거나 데이터를 지우는 것은 아닙니다.
+
+진짜 위험은 다른 데 있습니다. 이미 schema와 reference data가 들어 있는 DB에 `V001`, `V002`를 그대로 실행하려고 하면 객체가 이미 존재해서 실패하거나, 더 나쁘게는 의도치 않은 데이터 변경이 생길 수 있습니다.
+
+기존 RDS를 승계할 때는 다음 절차가 필요합니다.
+
+```text
+1. snapshot 또는 backup 생성
+2. 현재 DB가 V001 schema와 V002 reference data와 일치하는지 확인
+3. migrator 계정으로 flyway_schema_history에 baseline version=2 기록
+4. 이후 V003+ migration부터 정상 적용
+```
+
+중요한 것은 `baseline-on-migrate`를 전역으로 켜지 않는 것입니다. 기존 DB 승계는 한 번의 운영 작업이어야 합니다. 앱 설정에 항상 켜두면 예상하지 못한 DB도 조용히 baseline 처리될 수 있습니다.
+
+## 배포 스크립트에서 migration을 먼저 실행한다
+
+정상 배포 순서는 migration이 service rollout보다 앞서야 합니다.
+
+```text
+deploy_image.sh
+  -> 현재 ECS service task definition 조회
+  -> migration용 task definition 복제
+  -> APP_MIGRATION_ONLY=true
+  -> SPRING_FLYWAY_ENABLED=true
+  -> SPRING_MAIN_WEB_APPLICATION_TYPE=none
+  -> APP_SCHEDULING_ENABLED=false
+  -> ECS run-task
+  -> task exit code 확인
+  -> 성공하면 ECS service image update
+```
+
+여기서 `APP_SCHEDULING_ENABLED=false`가 중요합니다. migration task는 service task definition을 복제해서 실행하기 때문에, 별도로 막지 않으면 scheduler가 migration task 안에서 같이 뜰 수 있습니다. migration을 하려고 띄운 one-off task가 정산 스케줄러까지 실행하면 운영 경계가 무너집니다.
+
+또 하나의 보강은 같은 image digest 배포에서도 migration 확인 경로를 유지하는 것입니다. 이미지가 같다는 이유로 배포 스크립트가 너무 일찍 종료되면, 운영자가 migration 확인을 의도했는데 스킵될 수 있습니다. 그래서 `--force-migration` 옵션을 두고, migration은 service rollout 전에 항상 확인되도록 정리했습니다.
+
+## DB default privilege도 migrator 기준으로 봐야 한다
+
+DB role을 분리하면 default privilege도 다시 봐야 합니다.
+
+처음에는 DB owner 기준 default privilege만 생각하기 쉽습니다. 하지만 Flyway가 만든 table과 sequence의 owner는 `settlement_migrator`입니다. 그러면 future object에 대한 권한도 migrator role 기준으로 부여돼야 합니다.
+
+그래서 bootstrap에서 다음을 보강했습니다.
+
+```text
+ALTER DEFAULT PRIVILEGES FOR ROLE settlement_migrator IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO settlement_app;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE settlement_migrator IN SCHEMA public
+  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO settlement_app;
+```
+
+이걸 놓치면 migration은 성공했는데 앱이 새 table이나 sequence를 쓰지 못하는 이상한 장애가 납니다. 권한 분리는 좋지만, object owner가 누구인지까지 같이 봐야 합니다.
+
+## 최종 운영 경계
+
+정리하면 책임은 이렇게 나눴습니다.
+
+| 데이터/작업 | 책임 위치 | 이유 |
+| --- | --- | --- |
+| schema | Flyway `db/migration` | 모든 환경에서 같은 구조 |
+| 공통 reference data | Flyway `db/migration` | 모든 환경에서 같은 기준 |
+| local sample data | `db/seed/local` | 개발 편의, 운영 JAR에서 제외 |
+| 병원별 account routing | admin onboarding API | CMS 계좌와 병원 정책에 의존 |
+| 병원별 payroll transfer setting | admin onboarding API | 병원마다 계좌와 이체일이 다름 |
+| 첫 관리자 계정 | ECS admin provision one-off task | 환경별 운영 데이터, 초기 비밀번호 필요 |
+| DB user/secret | bootstrap script + Secrets Manager | Terraform state에 password를 남기지 않기 |
+| migration 실행 | ECS one-off task | 앱 런타임과 DDL 권한 분리 |
+
+## 배운 점
+
+Flyway 도입 자체는 어렵지 않습니다. 어려운 부분은 어떤 데이터를 migration으로 보지 않을지 결정하는 것입니다.
+
+이번 전환에서 기준은 다음이었습니다.
+
+- 모든 환경에서 같은 의미면 migration
+- local 개발 편의면 local seed
+- 병원마다 다르면 onboarding API
+- 실제 계정과 비밀번호면 provision task
+- DDL 권한이 필요하면 migrator role
+- 앱이 계속 떠 있어야 하면 service task
+
+`init-db`는 초기 개발 속도를 높여줬습니다. 하지만 운영 직전에는 history, 권한, seed 경계, 병원별 데이터 생성 흐름이 필요했습니다. Flyway는 그중 history를 맡았고, 나머지는 ECS one-off task, admin API, bootstrap, runbook으로 나눴습니다.
+
+결국 migration 설계는 SQL 파일을 어디에 둘지의 문제가 아니라, 운영 데이터의 소유권을 어디에 둘지의 문제였습니다.
