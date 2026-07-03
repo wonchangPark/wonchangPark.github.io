@@ -43,7 +43,27 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
             <p class="section-label">전체 글</p>
             <h2>문제별 기술 기록</h2>
           </div>
-          <p class="post-count" data-post-count>{posts.length}개 글</p>
+          <div class="post-list-tools">
+            <p class="post-count" data-post-count>{posts.length}개 글</p>
+            <div class="sort-toggle" role="group" aria-label="글 정렬">
+              <button
+                class="sort-toggle-button is-active"
+                type="button"
+                data-sort-value="recommended"
+                aria-pressed="true"
+              >
+                추천순
+              </button>
+              <button
+                class="sort-toggle-button"
+                type="button"
+                data-sort-value="latest"
+                aria-pressed="false"
+              >
+                최신순
+              </button>
+            </div>
+          </div>
         </div>
         <div class="post-list" data-post-list>
           {
@@ -53,6 +73,8 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
                 href={`/posts/${post.id}/`}
                 aria-label={`${post.data.title} 글 읽기`}
                 data-post-tech-stacks={post.data.techStacks.join("|")}
+                data-post-priority={post.data.priority}
+                data-post-date={post.data.pubDate.valueOf()}
               >
                 <p class="article-meta post-row-meta">
                   {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
@@ -112,6 +134,10 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
     if (postBrowser) {
       const rows = Array.from(postBrowser.querySelectorAll("[data-post-tech-stacks]"));
       const controls = Array.from(postBrowser.querySelectorAll("[data-filter-value]"));
+      const sortControls = Array.from(
+        postBrowser.querySelectorAll<HTMLButtonElement>("[data-sort-value]")
+      );
+      const postList = postBrowser.querySelector<HTMLElement>("[data-post-list]");
       const countLabel = postBrowser.querySelector("[data-post-count]");
       const resetButton = postBrowser.querySelector<HTMLButtonElement>("[data-filter-reset]");
       const filterValues = new Set<string>(
@@ -119,10 +145,60 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
           .map((control) => control.getAttribute("data-filter-value"))
           .filter((value): value is string => value !== null)
       );
+      const sortValues = new Set(["recommended", "latest"]);
       let activeTechStacks = new Set<string>();
+      let activeSort = "recommended";
 
       const getRowTechStacks = (row: Element) =>
         row.getAttribute("data-post-tech-stacks")?.split("|").filter(Boolean) ?? [];
+
+      const getRowNumber = (row: Element, attribute: string) => {
+        const value = Number(row.getAttribute(attribute));
+        return Number.isFinite(value) ? value : 0;
+      };
+
+      const sortRows = (sortValue: string) => {
+        if (!postList) return;
+
+        const sortedRows = [...rows].sort((a, b) => {
+          const dateDifference = getRowNumber(b, "data-post-date") - getRowNumber(a, "data-post-date");
+
+          if (sortValue === "latest") {
+            return dateDifference || getRowNumber(a, "data-post-priority") - getRowNumber(b, "data-post-priority");
+          }
+
+          return (
+            getRowNumber(a, "data-post-priority") - getRowNumber(b, "data-post-priority") ||
+            dateDifference
+          );
+        });
+
+        sortedRows.forEach((row) => postList.appendChild(row));
+      };
+
+      const setSort = (sortValue: string, writeHistory = true) => {
+        const nextSort = sortValues.has(sortValue) ? sortValue : "recommended";
+        const hasChanged = activeSort !== nextSort;
+
+        activeSort = nextSort;
+        sortRows(nextSort);
+
+        sortControls.forEach((control) => {
+          const isActive = control.getAttribute("data-sort-value") === nextSort;
+          control.classList.toggle("is-active", isActive);
+          control.setAttribute("aria-pressed", String(isActive));
+        });
+
+        if (writeHistory && hasChanged) {
+          const url = new URL(window.location.href);
+          if (nextSort === "recommended") {
+            url.searchParams.delete("sort");
+          } else {
+            url.searchParams.set("sort", nextSort);
+          }
+          window.history.pushState({ sort: nextSort }, "", url);
+        }
+      };
 
       const setSelectedTechStacks = (techStacks: string[], writeHistory = true) => {
         const selectedValues = techStacks.filter((techStack) => filterValues.has(techStack));
@@ -172,7 +248,19 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
         return params.getAll("tech");
       };
 
+      const readSortFromUrl = () => {
+        const params = new URLSearchParams(window.location.search);
+        return params.get("sort") ?? "recommended";
+      };
+
+      setSort(readSortFromUrl(), false);
       setSelectedTechStacks(readSelectedTechStacksFromUrl(), false);
+
+      sortControls.forEach((control) => {
+        control.addEventListener("click", () => {
+          setSort(control.getAttribute("data-sort-value") ?? "recommended");
+        });
+      });
 
       controls.forEach((control) => {
         control.addEventListener("click", () => {
@@ -195,6 +283,7 @@ const techStacks = [...orderedTechStacks, ...extraTechStacks];
       });
 
       window.addEventListener("popstate", () => {
+        setSort(readSortFromUrl(), false);
         setSelectedTechStacks(readSelectedTechStacksFromUrl(), false);
       });
     }
