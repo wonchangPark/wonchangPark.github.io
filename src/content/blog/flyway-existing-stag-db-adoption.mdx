@@ -1,0 +1,313 @@
+---
+title: "기존 staging DB를 버리지 않고 Flyway에 편입하는 방법"
+description: "이미 병원별 운영 데이터가 쌓인 staging DB를 재생성하지 않고 Flyway baseline version 2로 편입하기 위해 확인해야 할 기준과 보정 절차를 정리한 기록입니다."
+pubDate: 2026-07-03
+category: "Migration / Infra"
+tags: ["Flyway", "PostgreSQL", "Migration", "Operations"]
+techStacks: ["PostgreSQL / Flyway", "AWS / RDS", "Java / Spring"]
+featured: false
+priority: 6
+proof: "기존 DB adoption과 baseline"
+---
+
+Flyway를 새로 도입할 때 가장 쉬운 경로는 깨끗한 DB에서 `V001`, `V002`를 처음부터 실행하는 것입니다. 하지만 실제 운영 준비 과정에서는 그렇게 단순하지 않을 때가 많습니다.
+
+staging DB에는 이미 테스트와 운영 리허설을 거치며 쌓인 데이터가 있습니다. 특히 병원별 계정과목, 표시계정, 계좌 라우팅 룰, 급여 출금계좌 설정처럼 다시 만들기 번거로운 데이터가 들어 있습니다.
+
+이런 DB를 Flyway 도입 때문에 버리고 다시 만들 필요는 없습니다. 대신 기존 DB를 Flyway history에 편입하는 adoption 절차가 필요합니다.
+
+## 문제
+
+Flyway는 `flyway_schema_history`를 기준으로 어떤 migration이 적용됐는지 판단합니다.
+
+새 DB라면 흐름이 단순합니다.
+
+```text
+empty database
+  -> V001__baseline_schema.sql 실행
+  -> V002__reference_data.sql 실행
+  -> flyway_schema_history에 V001/V002 기록
+```
+
+하지만 기존 staging DB는 이미 비어 있지 않습니다.
+
+```text
+existing stag database
+  - schema already exists
+  - users/hospitals already exist
+  - hospital-specific account data already exists
+  - no flyway_schema_history yet
+```
+
+이 상태에서 `V001/V002`를 그대로 실행하면 실패할 가능성이 큽니다. table이 이미 존재하거나, seed data가 중복되거나, 병원별 데이터와 충돌할 수 있습니다.
+
+그래서 기존 DB에는 migration을 다시 실행하는 것이 아니라, “이 DB는 이미 V002까지 적용된 상태로 간주한다”는 baseline 기록을 남겨야 합니다.
+
+## baseline은 실행이 아니라 선언이다
+
+가장 중요한 차이는 이것입니다.
+
+```text
+flyway migrate
+  - migration SQL을 실제로 실행한다
+
+flyway baseline
+  - 이미 존재하는 DB를 특정 version부터 Flyway 관리 대상으로 선언한다
+```
+
+기존 staging DB에 `baseline version 2`를 찍는다는 말은 다음과 같은 선언입니다.
+
+```text
+"이 DB는 V001 schema와 V002 reference data가 이미 반영된 상태다.
+앞으로는 V003부터 Flyway가 관리한다."
+```
+
+여기서 위험한 부분은 Flyway가 이 선언의 진실 여부를 완벽하게 검증해주지 않는다는 점입니다. `flyway_schema_history`에 version 2 baseline이 찍히면 Flyway는 그 이후부터 `V003+`만 보게 됩니다.
+
+만약 실제 DB는 V002와 다른데 baseline만 찍으면 history와 현실이 어긋납니다.
+
+```text
+flyway_schema_history
+  -> V002 applied
+
+actual database
+  -> old roles
+  -> old template data
+  -> missing reference rows
+```
+
+이 상태가 제일 위험합니다. DB는 Flyway 관리 아래 들어온 것처럼 보이지만, 실제 기준 데이터는 baseline과 다릅니다.
+
+## baseline-on-migrate를 꺼둔 이유
+
+Spring Boot와 Flyway에는 `baseline-on-migrate`라는 옵션이 있습니다. 이 값을 true로 두면 비어 있지 않은 DB에 Flyway history가 없을 때 자동으로 baseline을 잡을 수 있습니다.
+
+편해 보이지만 운영에서는 위험합니다.
+
+```text
+non-empty database
+no flyway_schema_history
+baseline-on-migrate=true
+  -> 자동 baseline
+```
+
+자동 baseline은 “이 DB가 정말 어떤 version과 같은지”를 사람이 확인하기 전에 history를 만들어버릴 수 있습니다. 그래서 운영에서는 `baseline-on-migrate=false`가 더 안전합니다.
+
+이 설정에서는 비어 있지 않은 DB에 실수로 Flyway migrate를 실행하면 실패합니다.
+
+```text
+non-empty database
+no flyway_schema_history
+baseline-on-migrate=false
+  -> fail fast
+```
+
+이 실패는 좋은 실패입니다. “먼저 adoption checklist를 확인하고 명시적으로 baseline을 찍어라”는 안전장치이기 때문입니다.
+
+## 보존해야 하는 데이터와 맞춰야 하는 데이터
+
+기존 staging DB adoption에서 모든 데이터를 V002와 똑같이 만들 필요는 없습니다. 데이터에는 소유권이 다릅니다.
+
+보존해야 하는 데이터는 병원별 운영 데이터입니다.
+
+```text
+preserve
+  - hospitals
+  - users
+  - account_subjects
+  - account_subject_displays
+  - account_subject_display_mappings
+  - account_subject_account_routing_rules
+  - payroll_transfer_account_settings
+  - bank_account_mappings
+```
+
+이 데이터는 병원마다 다릅니다. Flyway common migration이 소유할 데이터가 아닙니다.
+
+반대로 baseline 전에 맞춰야 하는 데이터는 공통 기준 데이터입니다.
+
+```text
+verify and reconcile
+  - roles
+  - banks
+  - template_versions
+  - account_subject_templates
+  - account_subject_display_templates
+  - account_subject_display_mapping_templates
+  - account_subject_system_mapping_templates
+  - payroll_mapping_rule_templates
+  - calendar/date reference data
+```
+
+이 데이터는 “V002가 적용됐다”고 말하려면 실제 DB도 V002와 같은 의미를 가져야 합니다.
+
+## roles가 좋은 예시였다
+
+가장 헷갈리기 쉬운 예시는 role입니다.
+
+기존 staging DB에는 `ADMIN`, `USER`만 있을 수 있습니다. 하지만 새 기준에서는 역할이 다음처럼 나뉩니다.
+
+```text
+PLATFORM_ADMIN
+HOSPITAL_ADMIN
+USER
+```
+
+이 상태에서 바로 baseline version 2를 찍으면 문제가 됩니다.
+
+```text
+V002 says:
+  PLATFORM_ADMIN / HOSPITAL_ADMIN / USER exist
+
+stag DB says:
+  ADMIN / USER exist
+
+baseline version 2:
+  "V002까지 완료"
+```
+
+이건 거짓 history입니다.
+
+그래서 baseline 전에 role reconciliation이 필요합니다. 단순히 `ADMIN`을 삭제하면 안 됩니다. 기존 user가 `ADMIN` role을 참조하고 있을 수 있기 때문입니다.
+
+안전한 순서는 다음과 같습니다.
+
+```text
+1. PLATFORM_ADMIN / HOSPITAL_ADMIN / USER role이 존재하는지 확인
+2. 없으면 추가
+3. 기존 ADMIN role을 사용하는 user를 확인
+4. 각 user를 PLATFORM_ADMIN 또는 HOSPITAL_ADMIN 중 하나로 매핑
+5. ADMIN role 참조가 0건인지 확인
+6. 그 뒤에 ADMIN role 제거 또는 soft-delete 여부 결정
+```
+
+핵심은 “V002 seed를 통째로 다시 실행한다”가 아닙니다. 현재 DB에서 부족한 공통 기준 데이터만 명시적으로 보정하는 것입니다.
+
+## adoption checklist가 필요한 이유
+
+adoption checklist의 목적은 단순합니다.
+
+```text
+"이 DB에 baseline version 2를 찍어도 거짓말이 아닌가?"
+```
+
+체크리스트는 최소한 다음 질문에 답해야 합니다.
+
+```text
+schema
+  - V001의 핵심 table/column/index가 존재하는가?
+  - 앱이 ddl-auto=validate로 뜰 수 있는가?
+
+reference data
+  - V002의 roles가 존재하는가?
+  - bank reference row 수와 주요 code가 맞는가?
+  - active template version이 하나인가?
+  - account subject template tree가 최신 v2 용어를 쓰는가?
+  - old v1 용어가 남아 있지 않은가?
+
+operational data
+  - 병원별 account data를 보존할 것인가?
+  - routing rules와 payroll settings는 건드리지 않는가?
+
+history
+  - flyway_schema_history가 아직 없는가?
+  - baseline version 2를 찍은 뒤 V003+부터 관리할 준비가 됐는가?
+```
+
+이 체크를 통과한 뒤에만 baseline을 찍어야 합니다.
+
+## 보정은 어떻게 하는가
+
+보정은 Flyway migration으로 하지 않습니다. 아직 Flyway history에 들어가기 전의 DB를 V002와 맞추는 adoption 작업입니다.
+
+그래서 절차는 명시적인 운영 SQL이나 runbook으로 처리하는 편이 맞습니다.
+
+```text
+1. RDS snapshot 생성
+2. read-only 검증 쿼리 실행
+3. 차이점 목록 작성
+4. 필요한 공통 기준 데이터만 reconciliation SQL 작성
+5. transaction 안에서 보정
+6. 다시 검증 쿼리 실행
+7. baseline version 2 등록
+```
+
+보정 SQL은 되도록 좁아야 합니다.
+
+예를 들어 role 보정이라면 이런 방향입니다.
+
+```sql
+insert into roles (name, description)
+values
+  ('PLATFORM_ADMIN', 'Platform administrator'),
+  ('HOSPITAL_ADMIN', 'Hospital administrator'),
+  ('USER', 'Regular user')
+on conflict (name) do update
+set description = excluded.description;
+```
+
+이 SQL은 예시일 뿐입니다. 실제 column 구조와 audit column 규칙에 맞춰 작성해야 합니다. 중요한 것은 병원별 운영 데이터를 건드리지 않는다는 점입니다.
+
+## baseline 등록
+
+검증과 보정이 끝난 뒤에야 baseline을 등록합니다.
+
+개념적으로는 다음과 같습니다.
+
+```bash
+flyway baseline \
+  -baselineVersion=2 \
+  -baselineDescription="Adopt existing stag database at V002"
+```
+
+실제 실행 방식은 운영 환경에 맞춰야 합니다. 로컬에서 직접 private RDS에 붙는 방식보다는, migrator credential을 사용하는 one-off task나 제한된 운영 경로에서 실행하는 편이 더 안전합니다.
+
+baseline 등록 뒤에는 다음 상태가 됩니다.
+
+```text
+flyway_schema_history
+  - version 2 baseline exists
+
+future deployment
+  - V003+ migration only
+```
+
+이제부터는 staging DB도 Flyway 관리 대상입니다. 이후 schema나 reference data 변경은 `V003+` migration으로만 들어가야 합니다.
+
+## adoption 후 바로 하지 말아야 할 것
+
+adoption 직후에는 병원별 데이터를 Flyway로 끌어들이고 싶은 유혹이 생길 수 있습니다. 하지 않는 편이 좋습니다.
+
+예를 들어 `account_subject_account_routing_rules`는 공통 기준 데이터가 아닙니다. 병원 계좌와 병원별 표시계정 매핑에 의존합니다.
+
+```text
+do not move to common Flyway migration
+  - account_subject_account_routing_rules
+  - payroll_transfer_account_settings
+  - real users
+  - real hospitals
+```
+
+이 데이터는 onboarding API나 운영 runbook이 소유해야 합니다. Flyway는 공통 schema와 공통 reference data의 이력을 맡는 것이 가장 안전합니다.
+
+## 배운 점
+
+기존 DB adoption에서 제일 중요한 말은 이것입니다.
+
+```text
+baseline is a claim
+```
+
+baseline은 SQL 실행이 아니라 선언입니다. 그래서 선언 전에 현실을 맞춰야 합니다.
+
+기존 staging DB를 유지하는 것은 충분히 가능합니다. 병원별 데이터가 많을수록 오히려 유지하는 편이 맞습니다. 다만 Flyway history가 거짓말하지 않도록 공통 기준 데이터와 schema를 먼저 확인해야 합니다.
+
+정리하면 기준은 이렇습니다.
+
+- 병원별 운영 데이터는 보존한다.
+- 공통 기준 데이터는 V002와 맞춘다.
+- 다르면 adoption 전 reconciliation SQL로 보정한다.
+- 보정 후 baseline version 2를 명시적으로 찍는다.
+- 이후 변경은 V003+ migration으로만 관리한다.
+
+Flyway 도입은 새 DB를 만드는 기술만이 아닙니다. 이미 살아 있는 DB에 “이제부터 이력을 남기겠다”는 경계선을 긋는 일이기도 합니다. 그 경계선이 정확하려면 baseline이 무엇을 말하고 있는지 끝까지 의심해야 합니다.
