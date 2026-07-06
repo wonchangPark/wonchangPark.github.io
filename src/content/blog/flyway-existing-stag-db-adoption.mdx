@@ -2,6 +2,7 @@
 title: "기존 staging DB를 버리지 않고 Flyway에 편입하는 방법"
 description: "이미 병원별 운영 데이터가 쌓인 staging DB를 재생성하지 않고 Flyway baseline version 2로 편입하기 위해 확인해야 할 기준과 보정 절차를 정리한 기록입니다."
 pubDate: 2026-07-03
+updatedDate: 2026-07-06
 category: "Migration / Infra"
 tags: ["Flyway", "PostgreSQL", "Migration", "Operations"]
 techStacks: ["PostgreSQL / Flyway", "AWS / RDS", "Java / Spring"]
@@ -216,6 +217,121 @@ history
 
 이 체크를 통과한 뒤에만 baseline을 찍어야 합니다.
 
+## adoption에서 놓치기 쉬운 schema gap
+
+기존 DB adoption은 데이터만 보는 작업이 아닙니다. `baseline version 2`를 찍으면 Flyway는 `V001`, `V002`를 다시 실행하지 않습니다. 따라서 `V001`에 새로 생긴 column이 기존 DB에 없다면, baseline 이후 migration은 성공해도 앱이 `ddl-auto=validate`에서 실패할 수 있습니다.
+
+실제로 주의해야 했던 예시는 `users.password_change_required`였습니다.
+
+```text
+V001 schema
+  - users.password_change_required exists
+
+existing staging DB
+  - users table exists
+  - password_change_required column may not exist
+
+baseline version 2
+  - V001 skipped forever
+
+app startup
+  - ddl-auto=validate
+  - missing column failure
+```
+
+그래서 readiness check는 table 존재만 보면 부족합니다. `information_schema.columns`까지 봐야 합니다. 보정은 좁고 명시적으로 합니다.
+
+```sql
+alter table users
+  add column if not exists password_change_required boolean not null default false;
+```
+
+이런 보정은 Flyway migration이 아니라 adoption 전 reconcile입니다. baseline을 찍기 전에 “기존 DB가 V001 schema와 같은 상태”가 되도록 맞추는 작업입니다.
+
+## migrator ownership도 adoption 대상이다
+
+또 하나 놓치기 쉬운 부분은 PostgreSQL object owner입니다.
+
+새 DB에서 Flyway를 처음 실행하면 `settlement_migrator`가 table과 sequence를 만들기 때문에 owner도 migrator가 됩니다. 하지만 기존 staging DB는 과거 bootstrap이나 master 계정으로 만들어졌을 수 있습니다. 이 상태에서 baseline만 찍으면 앞으로의 V003+ migration은 migrator 계정으로 실행되지만, 기존 table의 owner는 migrator가 아닙니다.
+
+PostgreSQL에서 기존 table을 `ALTER TABLE` 하려면 단순 grant만으로는 부족합니다. 보통 table owner여야 합니다.
+
+```text
+existing table owner: master
+future migration user: settlement_migrator
+
+V003
+  -> alter table users add column ...
+  -> must be owner of table users
+```
+
+그래서 adoption checklist에는 ownership 확인이 들어가야 합니다.
+
+```sql
+select
+  n.nspname as schema_name,
+  c.relname as object_name,
+  c.relkind as object_type,
+  pg_get_userbyid(c.relowner) as owner
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public'
+  and c.relkind in ('r', 'p', 'S', 'v', 'm')
+order by 1, 2;
+```
+
+보정은 환경의 기존 owner와 권한 정책에 맞춰 결정합니다. 핵심은 baseline 전에 migrator가 앞으로의 migration을 수행할 수 있는 owner 또는 충분한 권한을 갖게 만드는 것입니다.
+
+```sql
+-- 예시. 실제 실행 전 owner, extension object, 제외 대상 확인이 필요하다.
+alter table users owner to settlement_migrator;
+alter sequence users_id_seq owner to settlement_migrator;
+```
+
+객체가 많다면 동적 SQL이나 `REASSIGN OWNED`를 검토할 수 있습니다. 다만 `REASSIGN OWNED`는 해당 role이 소유한 모든 객체에 영향을 줄 수 있으므로, 운영 DB에서는 대상 role과 schema 범위를 먼저 확인해야 합니다.
+
+## bootstrap-db-users는 언제 실행하는가
+
+기존 DB를 보존한다고 해서 DB user bootstrap이 필요 없어지는 것은 아닙니다. Flyway 전환 후에는 최소한 다음 계정이 필요합니다.
+
+```text
+settlement_app
+settlement_migrator
+settlement_readonly
+settlement_admin
+```
+
+여기서 `bootstrap-db.sh`와 `bootstrap-db-users.sh`의 역할을 분리해야 합니다.
+
+```text
+bootstrap-db.sh
+  - database 자체 생성
+  - 새 환경에서만 필요
+  - 기존 RDS adoption에서는 보통 실행하지 않는다
+
+bootstrap-db-users.sh
+  - DB role/user 생성 또는 재확인
+  - Secrets Manager secret 생성 또는 재사용
+  - app/migrator/readonly/admin 권한 재부여
+  - default privileges 재적용
+  - 기존 DB adoption에서도 필요할 수 있다
+```
+
+`bootstrap-db-users.sh`는 멱등하게 설계되어야 합니다. 이미 존재하는 DB를 drop하거나 데이터를 지우는 스크립트가 아니라, 계정과 secret, grant를 현재 기준으로 맞추는 작업이어야 합니다.
+
+즉, 기존 staging DB adoption에서는 다음처럼 생각했습니다.
+
+```text
+database exists
+  -> do not recreate database
+  -> run or verify bootstrap-db-users
+  -> verify migrator secret
+  -> verify grants/default privileges
+  -> run readiness check
+```
+
+이 순서가 중요한 이유는 baseline 등록과 이후 one-off migration이 `settlement_migrator` credential을 사용하기 때문입니다. migrator secret이나 role이 없으면 Flyway를 실행할 수 없습니다.
+
 ## 보정은 어떻게 하는가
 
 보정은 Flyway migration으로 하지 않습니다. 아직 Flyway history에 들어가기 전의 DB를 V002와 맞추는 adoption 작업입니다.
@@ -248,6 +364,8 @@ set description = excluded.description;
 
 이 SQL은 예시일 뿐입니다. 실제 column 구조와 audit column 규칙에 맞춰 작성해야 합니다. 중요한 것은 병원별 운영 데이터를 건드리지 않는다는 점입니다.
 
+schema gap이나 ownership gap도 같은 원칙입니다. baseline 후에 V001/V002가 실행되기를 기대하지 말고, baseline 전에 현재 DB를 기준 상태로 맞춥니다.
+
 ## baseline 등록
 
 검증과 보정이 끝난 뒤에야 baseline을 등록합니다.
@@ -273,6 +391,35 @@ future deployment
 ```
 
 이제부터는 staging DB도 Flyway 관리 대상입니다. 이후 schema나 reference data 변경은 `V003+` migration으로만 들어가야 합니다.
+
+baseline 직후 바로 확인할 것은 두 가지입니다.
+
+```text
+1. flyway_schema_history에 version 2 baseline이 있는가?
+2. 같은 image로 migration-only one-off task를 실행했을 때 validate가 통과하는가?
+```
+
+두 번째가 중요합니다. baseline row가 있다고 해서 앱이 뜰 준비가 끝난 것은 아닙니다. migrator credential, object ownership, 신규 column, Flyway location, local seed 제외가 함께 맞아야 합니다.
+
+## 실제 진행 순서
+
+운영 리허설에서는 순서를 문서화해 두는 편이 좋습니다.
+
+```text
+1. RDS snapshot 생성
+2. bootstrap-db-users.sh 실행 또는 결과 확인
+3. readiness check 실행
+4. FAIL 항목 확인
+5. 필요한 reconciliation SQL 작성
+6. transaction 안에서 보정
+7. readiness check 재실행
+8. flyway baseline -baselineVersion=2
+9. migration-only one-off task 실행
+10. app service rollout
+11. local/API smoke 또는 주요 화면 확인
+```
+
+이 순서에서 핵심은 baseline이 중간이 아니라 “검증과 보정 뒤의 선언”이라는 점입니다. baseline을 먼저 찍고 나중에 맞추려 하면, Flyway history가 현실보다 앞서가게 됩니다.
 
 ## adoption 후 바로 하지 말아야 할 것
 
@@ -307,6 +454,8 @@ baseline은 SQL 실행이 아니라 선언입니다. 그래서 선언 전에 현
 - 병원별 운영 데이터는 보존한다.
 - 공통 기준 데이터는 V002와 맞춘다.
 - 다르면 adoption 전 reconciliation SQL로 보정한다.
+- 기존 schema gap과 object ownership을 확인한다.
+- DB user/secret/grant는 `bootstrap-db-users.sh`로 맞춘다.
 - 보정 후 baseline version 2를 명시적으로 찍는다.
 - 이후 변경은 V003+ migration으로만 관리한다.
 

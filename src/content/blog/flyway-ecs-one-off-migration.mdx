@@ -2,6 +2,7 @@
 title: "init-db에서 Flyway와 ECS one-off migration으로 넘어간 기록"
 description: "운영 직전 init-db 기반 초기화 흐름을 Flyway baseline, reference data migration, ECS one-off task, 병원 온보딩 API로 나누며 겪은 문제와 해결을 정리한 기록입니다."
 pubDate: 2026-07-03
+updatedDate: 2026-07-06
 category: "Migration / Infra"
 tags: ["Flyway", "PostgreSQL", "ECS", "Migration"]
 techStacks: ["Java / Spring", "PostgreSQL / Flyway", "AWS / ECS"]
@@ -116,7 +117,7 @@ settlement-backend
   - Flyway migration SQL
   - local seed
   - migration-only application mode
-  - admin/onboarding API
+  - hospital onboarding API
 ```
 
 처음에는 migration 실행 스크립트까지 Terraform에서 강하게 관리할 수도 있었습니다. 하지만 schema와 reference data는 backend 버전과 함께 움직여야 합니다. Terraform repo가 SQL 내용을 알기 시작하면 schema 변경 때마다 두 repo 사이에 drift가 생기기 쉽습니다.
@@ -269,7 +270,11 @@ POST /api/admin/hospitals/{hospitalId}/payroll-transfer-account-settings
 
 회원가입 API가 열려 있지 않은 서비스라면 첫 관리자 계정이 필요합니다. 하지만 이 역시 Flyway common seed에 넣지 않았습니다.
 
-운영 관리자 계정은 환경마다 다르고, 병원마다 다릅니다. password도 migration 파일에 들어가면 안 됩니다. 그래서 admin provision one-off task로 분리했습니다.
+운영 관리자 계정은 환경마다 다르고, 병원마다 다릅니다. password도 migration 파일에 들어가면 안 됩니다. 그래서 이 기능은 Flyway migration이 아니라 별도 provision 또는 제한된 가입 flow가 소유해야 합니다.
+
+처음에는 Flyway 도입 PR 안에서 admin provision까지 같이 만들 수 있다고 생각했습니다. 하지만 다시 보니 이것은 DB migration 기능이라기보다 사용자/권한 생성 정책에 가까웠습니다. 그래서 Flyway 전환의 핵심 범위에서는 제외하고, 별도 이슈와 브랜치에서 다루는 편이 맞다고 판단했습니다.
+
+나중에 provision을 만든다면 흐름은 다음처럼 가져갈 수 있습니다.
 
 ```text
 provision_admin.sh
@@ -280,7 +285,7 @@ provision_admin.sh
   -> 초기 비밀번호를 로그에 한 번만 출력
 ```
 
-메일 시스템이 아직 없다면 초기 비밀번호를 안전하게 전달하고, 첫 로그인 후 비밀번호 변경을 강제하는 방식이 현실적입니다. 대신 이 흐름을 만들 때 몇 가지 보강이 필요했습니다.
+메일 시스템이 아직 없다면 초기 비밀번호를 안전하게 전달하고, 첫 로그인 후 비밀번호 변경을 강제하는 방식이 현실적입니다. 대신 이 흐름을 만들 때는 몇 가지 보강이 필요합니다.
 
 - 비밀번호 정책을 12-64자, 대문자/소문자/숫자/특수문자 필수로 통일
 - 직접 지정한 provision password도 같은 정책으로 검증
@@ -290,7 +295,7 @@ provision_admin.sh
 - `passwordChangeRequired`를 매 요청 DB 조회가 아니라 session record에서 읽도록 변경
 - soft-deleted hospital에는 admin을 만들 수 없도록 active hospital 조회로 변경
 
-첫 관리자 계정은 작아 보이지만 운영 보안의 시작점입니다. 특히 “임시 비밀번호를 나중에 바꾸면 되겠지”가 아니라, 시스템이 첫 로그인 후 변경을 강제해야 합니다.
+첫 관리자 계정은 작아 보이지만 운영 보안의 시작점입니다. 특히 “임시 비밀번호를 나중에 바꾸면 되겠지”가 아니라, 시스템이 첫 로그인 후 변경을 강제해야 합니다. 다만 이것은 Flyway의 책임이 아니라 사용자 생성 정책의 책임입니다.
 
 ## 기존 RDS는 baseline으로 승계한다
 
@@ -330,6 +335,48 @@ deploy_image.sh
 
 또 하나의 보강은 같은 image digest 배포에서도 migration 확인 경로를 유지하는 것입니다. 이미지가 같다는 이유로 배포 스크립트가 너무 일찍 종료되면, 운영자가 migration 확인을 의도했는데 스킵될 수 있습니다. 그래서 `--force-migration` 옵션을 두고, migration은 service rollout 전에 항상 확인되도록 정리했습니다.
 
+## one-off가 무중단을 보장하지는 않는다
+
+ECS one-off migration을 service rollout보다 먼저 실행한다고 해서 자동으로 무중단 배포가 되는 것은 아닙니다. migration 실행 위치와 schema 변경 방식은 다른 문제입니다.
+
+예를 들어 새 버전 앱이 쓰는 column을 먼저 추가하는 것은 괜찮습니다.
+
+```text
+V003 expand
+  -> add nullable column
+  -> add new table
+  -> add index concurrently
+  -> old app still works
+  -> new app rollout
+```
+
+하지만 기존 앱이 아직 떠 있는 상태에서 column type을 바꾸거나 column을 삭제하면 문제가 됩니다.
+
+```text
+V003 destructive change
+  -> drop old column
+  -> old app still queries old column
+  -> old task fails before rollout finishes
+```
+
+그래서 migration 규칙은 `expand -> backfill -> contract`로 잡았습니다.
+
+| 단계 | 할 일 | 배포 호환성 |
+| --- | --- | --- |
+| expand | 새 column/table/index 추가, nullable 또는 backward-compatible 형태로 시작 | 기존 앱과 새 앱이 함께 동작해야 한다 |
+| backfill | 기존 데이터를 새 구조로 채운다. 가능하면 idempotent하게 작성한다 | 여러 번 실행되어도 같은 결과여야 한다 |
+| switch | 앱이 새 구조를 읽고 쓰도록 바꾼다. 필요하면 dual write를 둔다 | rollout 중 구버전/신버전이 공존한다 |
+| contract | 더 이상 쓰지 않는 column/table/index 제거 | old code가 완전히 사라진 뒤 별도 migration으로 처리한다 |
+
+이 규칙이 없으면 Flyway 도입 후에도 언젠가는 위험한 DDL이 쉽게 섞입니다. 그래서 migration 파일에는 변경 성격을 명시하는 주석을 요구하고, lint로 위험 DDL을 막는 방향을 택했습니다.
+
+```sql
+-- @migration-type: expand
+-- @description: add nullable settlement memo column
+```
+
+`DROP COLUMN`, `DROP TABLE`, 직접적인 type 변경, rename처럼 기존 앱을 깨뜨릴 수 있는 작업은 `contract` migration에서만 허용하고, 왜 안전한지 근거를 남기도록 합니다. 도구가 완벽한 판단을 대신할 수는 없지만, 최소한 위험한 변경을 “무심코” 넣는 일은 줄일 수 있습니다.
+
 ## DB default privilege도 migrator 기준으로 봐야 한다
 
 DB role을 분리하면 default privilege도 다시 봐야 합니다.
@@ -348,6 +395,35 @@ ALTER DEFAULT PRIVILEGES FOR ROLE settlement_migrator IN SCHEMA public
 
 이걸 놓치면 migration은 성공했는데 앱이 새 table이나 sequence를 쓰지 못하는 이상한 장애가 납니다. 권한 분리는 좋지만, object owner가 누구인지까지 같이 봐야 합니다.
 
+## 검증은 migrate 성공에서 끝나지 않는다
+
+Flyway가 성공했다는 말은 SQL이 적용됐다는 뜻입니다. 하지만 앱의 모든 API가 새 schema와 reference data 위에서 런타임 오류 없이 동작한다는 뜻은 아닙니다.
+
+그래서 local에서는 깨끗한 DB를 만들고 다음 순서로 검증했습니다.
+
+```text
+1. local DB drop/recreate
+2. SPRING_FLYWAY_ENABLED=true로 앱 기동
+3. V001/V002/R__local_seed 적용 확인
+4. ddl-auto=validate 통과 확인
+5. OpenAPI 기반 local API smoke 실행
+```
+
+API smoke는 비즈니스 정합성 E2E가 아닙니다. 목적은 더 좁습니다.
+
+```text
+catch
+  - missing table
+  - missing column
+  - enum conversion failure
+  - request binding 5xx
+  - reference data 누락으로 인한 예상 밖 서버 예외
+```
+
+외부 CMS 조회, 실제 이체, iPRO sync, multipart upload, maintenance 작업은 제외했습니다. 대신 조회 API와 안전한 범위의 mutating API를 OpenAPI 문서 기준으로 한 번씩 호출하고, `server_error=0`, `network_error=0`을 기준으로 봤습니다.
+
+이 검증은 “API가 완전히 맞다”를 증명하지 않습니다. 하지만 Flyway 전환 후 가장 피하고 싶은 종류의 사고, 즉 schema/reference data 누락으로 앱이 500을 내는 문제를 빠르게 잡아줍니다.
+
 ## 최종 운영 경계
 
 정리하면 책임은 이렇게 나눴습니다.
@@ -357,9 +433,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE settlement_migrator IN SCHEMA public
 | schema | Flyway `db/migration` | 모든 환경에서 같은 구조 |
 | 공통 reference data | Flyway `db/migration` | 모든 환경에서 같은 기준 |
 | local sample data | `db/seed/local` | 개발 편의, 운영 JAR에서 제외 |
-| 병원별 account routing | admin onboarding API | CMS 계좌와 병원 정책에 의존 |
-| 병원별 payroll transfer setting | admin onboarding API | 병원마다 계좌와 이체일이 다름 |
-| 첫 관리자 계정 | ECS admin provision one-off task | 환경별 운영 데이터, 초기 비밀번호 필요 |
+| 병원별 account routing | hospital onboarding API | CMS 계좌와 병원 정책에 의존 |
+| 병원별 payroll transfer setting | hospital onboarding API | 병원마다 계좌와 이체일이 다름 |
+| 첫 관리자 계정 | provision 또는 제한된 가입 flow | 환경별 운영 데이터, 초기 비밀번호 정책 필요 |
 | DB user/secret | bootstrap script + Secrets Manager | Terraform state에 password를 남기지 않기 |
 | migration 실행 | ECS one-off task | 앱 런타임과 DDL 권한 분리 |
 
@@ -372,7 +448,7 @@ Flyway 도입 자체는 어렵지 않습니다. 어려운 부분은 어떤 데�
 - 모든 환경에서 같은 의미면 migration
 - local 개발 편의면 local seed
 - 병원마다 다르면 onboarding API
-- 실제 계정과 비밀번호면 provision task
+- 실제 계정과 비밀번호면 provision 또는 제한된 가입 flow
 - DDL 권한이 필요하면 migrator role
 - 앱이 계속 떠 있어야 하면 service task
 
