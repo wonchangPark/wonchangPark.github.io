@@ -1,0 +1,482 @@
+---
+title: "Flyway 도입과 dev ECS 전환을 같이 리허설한 기록"
+description: "init-db를 Flyway baseline으로 바꾸는 과정에서 리뷰로 발견한 문제, 기존 RDS adoption, Terraform/RDS 함정, dev ECS 전환 리허설까지 이어진 실제 작업 로그입니다."
+pubDate: 2026-07-06
+category: "Migration / Infra"
+tags: ["Flyway", "PostgreSQL", "AWS", "ECS", "RDS", "Terraform"]
+techStacks: ["Java / Spring", "PostgreSQL / Flyway", "AWS / ECS / RDS", "Terraform"]
+featured: true
+priority: 3
+proof: "Flyway 도입, 기존 DB adoption, dev ECS 전환 리허설"
+---
+
+Flyway를 도입하는 일은 SQL 파일을 `db/migration` 아래로 옮기는 정도로 끝나지 않았다.
+
+처음 문제는 단순했다. `init-db/` 아래에 SQL 파일이 140개 넘게 쌓였고, 운영이 가까워질수록 이 방식으로는 더 이상 DB의 현재 상태를 설명하기 어려웠다. 하지만 막상 Flyway를 넣으려고 보니 질문은 더 커졌다.
+
+```text
+schema와 reference data는 Flyway가 관리한다.
+그런데 이미 데이터가 있는 dev/stag RDS는 어떻게 편입할 것인가?
+마이그레이션은 앱 시작 시점에 실행할 것인가, 배포 전 one-off task로 실행할 것인가?
+병원별 계좌 라우팅 룰과 급여 출금계좌 설정은 seed인가, 운영 데이터인가?
+dev를 EC2에서 ECS로 옮기는 작업은 이 전환과 어떻게 맞물리는가?
+```
+
+이 글은 그 질문들을 하나씩 정리하며 실제로 PR을 만들고, 리뷰하고, 기존 DB adoption과 dev ECS 전환 리허설까지 설계한 기록이다. 앞선 글들이 Flyway 구조와 기존 DB 편입 절차를 각각 설명했다면, 이 글은 그 사이에서 실제로 부딪힌 문제와 판단의 순서를 남기는 작업 로그에 가깝다.
+
+## 시작점: init-db를 그대로 history로 만들지 않았다
+
+기존에는 DB를 준비할 때 `init-db/` 아래 SQL을 순서대로 실행했다. 개발 초기에는 충분히 좋았다. 하지만 시간이 지나면서 파일은 계속 늘었고, 오래된 entity 기준의 SQL과 현재 운영 가능한 기준 데이터가 한 폴더에 같이 남았다.
+
+Flyway를 도입하면서 가장 먼저 정한 원칙은 이것이었다.
+
+```text
+과거의 모든 중간 SQL을 보존하지 않는다.
+운영 직전의 현재 상태를 V001/V002로 다시 선언한다.
+```
+
+아직 Flyway history가 시작되지 않았기 때문에, `init-db`의 140개 넘는 파일을 모두 `V001`, `V002`, `V003`처럼 잘게 옮길 이유는 크지 않았다. 중요한 것은 “지금 운영 가능한 스키마와 모든 환경에서 공유할 기준 데이터”였다.
+
+그래서 출발점은 세 파일로 정했다.
+
+```text
+src/main/resources/db/migration/
+  V001__baseline_schema.sql
+  V002__reference_data.sql
+
+src/main/resources/db/seed/local/
+  R__local_seed.sql
+```
+
+`V001`은 현재 스키마의 clean baseline이다. `V002`는 모든 환경에서 같은 의미를 갖는 reference data다. `R__local_seed.sql`은 local 개발 편의를 위한 데이터만 담고, 배포 JAR에서는 제외한다.
+
+이때 가장 중요한 구분은 데이터의 소유권이었다.
+
+| 데이터 | 관리 위치 | 이유 |
+| --- | --- | --- |
+| schema | Flyway migration | 모든 환경에서 같은 구조 |
+| 역할, 은행, template, calendar 같은 공통 기준 데이터 | Flyway migration | 모든 환경에서 같은 의미 |
+| local sample 병원/유저 | local seed | 개발 편의, 운영에 들어가면 안 됨 |
+| 병원별 계좌 라우팅 룰 | 온보딩 API 또는 runbook | 병원 CMS 계좌와 표시계정 매핑에 의존 |
+| 급여 출금계좌 설정 | 온보딩 API 또는 runbook | 병원별 정책 데이터 |
+| 실제 관리자 계정 | 별도 사용자/권한 생성 정책 | 환경별 운영 데이터와 초기 비밀번호 정책이 필요 |
+
+Flyway가 모든 데이터를 소유하려고 하면 금방 위험해진다. 모든 환경에서 같은 의미를 갖는 데이터만 migration으로 넣고, 병원마다 달라지는 값은 운영 절차로 분리하는 편이 더 안전했다.
+
+## 앱 시작 migration 대신 ECS one-off task를 택했다
+
+Flyway는 Spring Boot 앱 시작 시 자동으로 실행할 수 있다. local에서는 편하다. 하지만 운영 배포에서는 앱 시작에 migration을 묶지 않기로 했다.
+
+운영 배포 순서는 이렇게 잡았다.
+
+```text
+새 이미지 build/push
+  -> deploy_image.sh
+  -> ECS one-off migration task 실행
+  -> migration 성공 확인
+  -> ECS service rollout
+```
+
+이유는 권한과 실패 범위를 분리하기 위해서다.
+
+앱 런타임 계정은 보통 DML 권한만 있으면 된다. 반면 Flyway는 DDL 권한이 필요하다. 앱 계정에 DDL 권한을 주면 런타임 버그나 credential 유출의 피해 범위가 커진다.
+
+그래서 계정을 나눴다.
+
+```text
+settlement_migrator
+  - Flyway 전용
+  - DDL 권한
+  - ECS one-off migration task에서만 사용
+
+settlement_app
+  - 앱 런타임 전용
+  - DML 권한
+  - ECS service task에서 사용
+
+settlement_readonly
+  - 운영 조회용
+
+settlement_admin
+  - 제한된 운영 작업용
+```
+
+인프라 관점에서도 ECS one-off task는 자연스러웠다. RDS는 private network 안에 있고, 앱도 ECS에서 실행된다. 그러면 migration도 같은 VPC, subnet, security group, log 경로를 재사용하는 편이 맞았다.
+
+다만 one-off task는 “앱을 다른 목적으로 한 번 켜는 것”이다. service task definition을 복제하면 웹 서버, scheduler, health check 관련 설정까지 같이 따라온다. 그래서 migration task에서는 명시적으로 끄고 켜야 하는 값들을 정리했다.
+
+```text
+APP_MIGRATION_ONLY=true
+SPRING_FLYWAY_ENABLED=true
+SPRING_MAIN_WEB_APPLICATION_TYPE=none
+APP_SCHEDULING_ENABLED=false
+```
+
+특히 `APP_SCHEDULING_ENABLED=false`가 중요했다. 이것을 빼면 migration task 안에서 `@Scheduled` job이 같이 깨어날 수 있다. DB migration을 하려고 띄운 task가 정산 스케줄러까지 실행하면 운영 경계가 무너진다.
+
+## 리뷰에서 가장 먼저 터진 것은 reference data였다
+
+스키마 쪽은 생각보다 깔끔했다. 구 `init-db` 전체 적용본과 새 `V001+V002` 적용본을 PostgreSQL에서 띄운 뒤 `pg_dump --schema-only`로 비교했다. 의도된 신규 컬럼과 고아 시퀀스 정리 정도를 제외하면 스키마 재현은 사실상 맞았다.
+
+문제는 데이터였다.
+
+계정과목/표시계정 템플릿은 신규 병원을 만들 때 복사되는 기준 데이터다. 그런데 첫 `V002` snapshot에는 v2 개편 이전의 용어가 남아 있었다.
+
+```text
+기대했던 최신 용어
+  - 인건비 (고정)
+  - 매출원가(병원사용분)
+  - 서비스이용료
+  - 봉직의 보수
+  - 솔루션비
+
+남아 있던 구 용어
+  - 테크거래(고정)
+  - 테크솔루션
+  - 원장단보수
+```
+
+또 `정의 필요`라는 root 계정이 남아 있었고, 선급금 계정의 부모 관계도 최신 구조와 맞지 않았다. 이런 문제는 코드 리뷰만으로 잡기 어렵다. SQL 스냅샷은 길고, 데이터의 의미는 도메인 맥락을 알아야 보인다.
+
+그래서 용어별 grep count와 템플릿 트리 비교로 확정했다. 그리고 `V002`를 최신 데이터 기준으로 다시 만들었다.
+
+보강은 여기서 끝내지 않았다. local seed가 계정과목 데이터를 별도로 들고 있으면 언젠가 `V002`와 다시 어긋난다. 그래서 local seed는 template 데이터를 직접 보관하지 않고, 활성 `DEFAULT_HOSPITAL_BOOTSTRAP_V1` 템플릿에서 `INSERT...SELECT`로 복사하도록 바꿨다.
+
+```text
+V002 template data
+  -> single source of truth
+  -> local seed copies from template
+```
+
+이 구조가 더 좋았다. template이 바뀌면 local seed를 따로 고치는 규칙이 아니라, 애초에 중복을 없애는 구조가 된다.
+
+## 병원별 파생 데이터는 Flyway에서 빼야 했다
+
+구 `init-db`에는 병원별 `account_subject_account_routing_rules`를 만드는 SQL이 있었다. 새 `V002`에는 이 데이터가 없었고, 앱 코드에도 쓰기 경로가 없었다. 그대로면 신규 환경에서 이체 확정 시 `ROUTING_RULE_NOT_FOUND`가 난다.
+
+처음에는 이 데이터를 `V002`에 넣을 수 있는지 고민했다. 하지만 곧 아니라고 결론냈다.
+
+`account_subject_account_routing_rules`는 병원별 CMS 계좌와 병원별 표시계정 매핑에 의존한다. 급여 출금계좌 설정도 병원마다 다르다.
+
+```text
+공통 migration으로 넣기 어려운 데이터
+  - account_subject_account_routing_rules
+  - payroll_transfer_account_settings
+  - real users
+  - real hospitals
+  - admin accounts
+```
+
+그래서 Flyway PR에서는 이 데이터를 common migration에 넣지 않기로 했다. 대신 병원 온보딩 흐름의 책임으로 분리한다.
+
+```text
+1. 병원 생성
+2. 기본 template을 병원 데이터로 복사
+3. 병원 CMS 계좌 등록
+4. 계좌 라우팅 룰 초기화
+5. 급여 이체 계좌 설정
+6. 관리자 사용자 생성
+```
+
+계좌 라우팅 룰 초기화와 급여 이체 계좌 설정 API는 Flyway PR에서 빼고 후속 PR로 분리했다. 이 분리가 중요했다. Flyway 도입 PR은 DB migration 체계의 경계를 만들고, 병원 온보딩 API는 운영 데이터 생성 정책을 다룬다. 두 가지는 연결되어 있지만 같은 기능은 아니다.
+
+## baseline은 “주장”이다
+
+기존 dev/stag RDS를 어떻게 할지도 큰 결정이었다. 처음에는 drop 후 `V001`부터 새로 만드는 경로를 생각했다. 하지만 이미 병원별 데이터가 들어 있고, 다시 맞추기 번거로운 값들이 많았다.
+
+그래서 방향을 바꿨다.
+
+```text
+기존 DB를 버리지 않는다.
+현재 DB가 V001/V002와 동등한지 검증하고,
+동등하게 만든 뒤 baseline version 2로 편입한다.
+```
+
+이때 가장 중요한 문장은 이것이었다.
+
+```text
+Baseline registration is a claim, not a migration.
+```
+
+baseline 등록은 SQL을 실행하는 것이 아니라 “이 DB는 이미 이 버전까지 적용된 상태다”라고 선언하는 일이다. 선언이 거짓이면 Flyway history와 실제 DB가 어긋난다.
+
+그래서 adoption 절차는 세 조각으로 나눴다.
+
+```text
+readiness check
+  - read-only SQL
+  - 기존 DB가 V001/V002와 동등하다고 말할 수 있는지 PASS/WARN/FAIL로 검증
+
+reconcile SQL
+  - 1회성 운영 SQL
+  - baseline 전에 필요한 차이만 좁게 보정
+  - COMMIT을 ROLLBACK으로 바꿔 dry-run 가능
+
+flyway baseline -baselineVersion=2
+  - 이후 migrate는 V001/V002를 건너뛰고 V003+만 실행
+```
+
+`baseline-on-migrate`는 켜지 않았다. 자동 baseline은 편하지만, 운영에서는 위험하다. 비어 있지 않은 DB에 `flyway_schema_history`가 없을 때 자동으로 baseline을 찍으면, 사람이 검증하기 전에 history가 현실보다 앞서갈 수 있다.
+
+`baseline-on-migrate=false`에서 실수로 migrate를 실행하면 실패한다. 이것은 좋은 실패다. “먼저 adoption checklist를 확인하고 명시적으로 baseline을 찍어라”는 안전장치이기 때문이다.
+
+## adoption에서 놓치기 쉬운 두 가지: schema gap과 ownership
+
+기존 DB 편입에서 데이터만 보면 부족하다.
+
+첫 번째는 schema gap이다. 예를 들어 `V001`에 새 컬럼이 있는데 기존 DB에는 없다면, baseline version 2를 찍은 뒤에는 `V001`이 영원히 실행되지 않는다. 그러면 앱은 `ddl-auto=validate`에서 실패한다.
+
+```text
+V001 schema
+  - users.some_new_column exists
+
+existing DB
+  - users table exists
+  - some_new_column missing
+
+baseline version 2
+  - V001 skipped forever
+
+app startup
+  - ddl-auto=validate failure
+```
+
+그래서 readiness check는 테이블 존재만 보는 것으로 충분하지 않다. 핵심 컬럼과 인덱스까지 봐야 한다.
+
+두 번째는 object ownership이다.
+
+새 DB에서 Flyway를 처음 실행하면 `settlement_migrator`가 테이블과 시퀀스를 만들기 때문에 owner도 migrator다. 하지만 기존 DB는 과거 bootstrap이나 master 계정으로 만들어졌을 수 있다.
+
+```text
+existing table owner: master
+future migration user: settlement_migrator
+
+V003
+  -> alter table ...
+  -> must be owner of table
+```
+
+단순 grant만으로는 기존 테이블을 마음대로 `ALTER TABLE` 할 수 없다. 그래서 adoption 보정에는 public table/sequence ownership을 migrator로 이전하는 단계가 들어갔다.
+
+RDS에서는 여기에도 함정이 있었다. 기존 owner가 대상 role의 member가 아니면 `OWNER TO settlement_migrator`가 막힐 수 있다. 그래서 보정 SQL은 필요할 때만 다음 흐름을 탄다.
+
+```text
+GRANT settlement_migrator TO current_user
+  -> ALTER TABLE/SEQUENCE ... OWNER TO settlement_migrator
+  -> REVOKE settlement_migrator FROM current_user
+```
+
+이 SQL은 Flyway migration이 아니다. baseline 전에 기존 DB를 “V001/V002라고 주장해도 되는 상태”로 맞추는 1회성 adoption 보정이다. 이름도 환경 전용으로 두지 않고 `reconcile-v2-before-baseline.sql`처럼 공통 편입 스크립트로 정리했다.
+
+## Terraform에서 만난 조용한 함정들
+
+Flyway 도입은 backend만의 일이 아니었다. 실제로 시간은 인프라 쪽에서도 꽤 썼다.
+
+첫 번째 함정은 migrator secret이었다.
+
+```bash
+terraform output -json rds_database_user_secret_arns | jq 'keys'
+# ["admin", "app", "readonly"]   # migrator가 없다
+```
+
+data 스택이 companion commit 이전 상태였기 때문에 migrator secret 껍데기가 없었다. data apply로 secret을 만들고, app 스택도 이어서 apply해야 했다. ECS task execution role이 migrator secret을 읽을 수 있어야 one-off migration task가 시작된다.
+
+이 배선은 `try()`로 감싸져 있었다. 그래서 구버전 data 스택이어도 plan은 지나가고, 런타임에서 `ResourceInitializationError`가 날 수 있었다. Terraform plan이 조용할 때도 실제 task가 읽을 secret과 IAM policy가 맞는지 봐야 한다.
+
+두 번째 함정은 RDS engine version이었다.
+
+```text
+~ engine_version = "17.9" -> "17.6"
+```
+
+`auto_minor_version_upgrade = true`가 유지보수 윈도우에 RDS를 17.9로 올렸는데, tfvars는 17.6으로 고정되어 있었다. RDS는 마이너 다운그레이드가 안 되므로 이 plan은 apply하면 실패한다.
+
+처음에는 AWS provider 문서에 나온 것처럼 major version만 지정하면 될 거라고 봤다. 하지만 실제 provider plan에서 diff 억제가 기대대로 동작하지 않았다. 결국 문서가 아니라 plan을 기준으로 판단했고, auto minor upgrade와 충돌하지 않도록 `ignore_changes = [engine_version]` 쪽으로 정리했다.
+
+교훈은 단순했다.
+
+```text
+provider 문서보다 현재 plan이 진실이다.
+```
+
+세 번째는 ElastiCache security group 변경이었다. plan에는 destroy/create처럼 보였지만, 실제 내용은 모듈 리팩토링으로 리소스 주소가 바뀐 것이었다. security group은 stateful이고 rule 내용도 같았기 때문에, 기존 연결 유지와 신규 연결 영향 범위를 보고 무해하다고 판단했다.
+
+## dev를 ECS로 옮기는 리허설까지 연결됐다
+
+Flyway adoption을 dev에서 먼저 연습하기로 했다. 동시에 dev 환경은 EC2 구조에서 ECS 구조로 옮길 예정이었다. 그래서 목표는 단순한 Flyway 테스트가 아니라, 데이터 보존 이관과 ECS 전환을 함께 리허설하는 것이 됐다.
+
+원칙은 세 가지였다.
+
+```text
+1. local에서는 완전 새 DB로 V001/V002/R__local_seed 경로를 검증한다.
+2. dev에서는 기존 DB를 보존한 adoption 경로를 검증한다.
+3. stag는 dev 리허설이 끝난 뒤 같은 절차로 진행한다.
+```
+
+dev 전환에서 중요한 포인트는 NAT EIP 보존이었다. 외부 연동 화이트리스트에 고정 IP가 들어가기 때문에 EIP를 잃으면 안 됐다.
+
+다행히 기존 스택은 EIP를 Terraform resource로 소유하지 않고 data source로 참조하고 있었다. 그래서 구 스택을 destroy해도 EIP 자체는 release되지 않는다. 새 foundation은 같은 allocation id를 NAT gateway에 다시 붙이면 된다.
+
+다만 순서는 중요하다.
+
+```text
+구 NAT gateway가 EIP를 잡고 있음
+  -> 새 NAT gateway에 같은 EIP를 붙일 수 없음
+  -> 구 스택 폐기 후 새 foundation apply 필요
+```
+
+또 하나의 충돌 지점은 리소스 이름이 아니라 SSM parameter였다. 구 dev는 표준화 이전에 만들어져 인스턴스 이름은 새 이름과 직접 충돌하지 않았다. 하지만 `/ms/dev/rds/*` 같은 parameter 경로는 겹칠 수 있었다. 그래서 스택 폐기 순서와 SSM parameter 소유권을 같이 봐야 했다.
+
+## 리허설 스크립트가 필요했다
+
+이 절차는 손으로 하기엔 길고 위험했다. 그래서 adoption 리허설을 자동화하는 스크립트를 설계했다.
+
+개념은 다음과 같다.
+
+```bash
+# 1. 스냅샷 생성 + 임시 인스턴스 복원
+scripts/db/adoption/rehearse-adoption.sh provision
+
+# 2. SSM 포트포워딩으로 private RDS 접속
+aws ssm start-session ...
+
+# 3. readiness -> reconcile -> baseline -> migrate no-op 검증
+PGHOST=127.0.0.1 PGPORT=15433 scripts/db/adoption/rehearse-adoption.sh run
+
+# 4. 임시 리소스 정리
+scripts/db/adoption/rehearse-adoption.sh cleanup
+```
+
+`run` 단계가 하는 일은 실전의 DB 관점 작업을 끝까지 재현하는 것이다.
+
+```text
+flyway_schema_history 부재 확인
+  -> DB 역할/secret 전제 확인
+  -> readiness check(before)
+  -> reconcile dry-run
+  -> reconcile 실행
+  -> readiness check(after)
+  -> flyway baseline version 2
+  -> flyway migrate가 "No migration necessary"로 끝나는지 검증
+  -> history 확인
+```
+
+여기에도 안전장치를 넣었다.
+
+- 시작 시 `rehearsal` 같은 확인 문자열을 요구한다.
+- 보정 후에도 FAIL이 남으면 baseline 전에 중단한다.
+- WARN은 검토 후 명시적으로만 통과시킨다.
+- 단계별 산출물을 파일로 남겨 다음 환경과 비교할 수 있게 한다.
+- flyway CLI가 없으면 Docker로 대체한다.
+
+이 스크립트의 수명은 길지 않다. dev 편입 1번, stag 편입 1번이면 대부분 역할이 끝난다. 그래도 남겨둘 가치가 있다. 체크리스트는 주장이고, 스크립트는 절차이며, 산출물은 증거가 된다.
+
+## 환경마다 secret의 모양이 달랐다
+
+일반화하면서 발견한 재미있는 차이도 있었다. master secret의 위치가 환경마다 달랐다.
+
+| 환경 | master secret 형태 |
+| --- | --- |
+| legacy dev | 모듈 자체 secret + 구 SSM prefix |
+| stag | RDS managed master user secret |
+| 전환 후 dev | RDS managed master user secret으로 수렴 |
+
+그래서 스크립트는 “현재 표준”만 믿지 않고 실제 존재하는 값을 조회하도록 만들었다.
+
+```text
+1. RDS managed master secret을 먼저 확인
+2. 없으면 SSM pointer fallback
+```
+
+인프라의 역사는 이름에 남는다. `settlement-postgres` 같은 구 이름이나 `/settlement/rds/...` 같은 구 prefix는 표준화 이전의 지층이었다. 일반화 코드는 문서상 표준이 아니라 실제 환경에 존재하는 흔적을 먼저 확인해야 한다.
+
+## migration lint로 프로세스를 강제했다
+
+Flyway를 도입해도 위험한 DDL을 아무 생각 없이 넣으면 언젠가 서비스가 깨진다. one-off migration task가 service rollout보다 먼저 실행되기 때문에, 구버전 앱이 아직 떠 있는 동안 새 스키마가 적용되는 시간이 생긴다.
+
+그래서 마이그레이션 타입을 파일에 명시하게 했다.
+
+```sql
+-- @migration-type: expand
+```
+
+허용 타입은 다음처럼 나눴다.
+
+| 타입 | 의미 |
+| --- | --- |
+| expand | 기존 앱과 호환되는 추가 변경 |
+| data | 호환 가능한 기준 데이터 변경 |
+| backfill | 기존 데이터를 새 구조로 채우는 작업 |
+| maintenance | 권한/운영성 보강 |
+| contract | old path가 사라진 뒤 제거/rename/제약 강화 |
+
+`DROP TABLE`, `DROP COLUMN`, column type 변경, rename, `ADD COLUMN NOT NULL` 같은 변경은 기본적으로 막고, contract migration에서만 명시적 근거와 함께 허용한다.
+
+```text
+expand
+  -> deploy
+  -> backfill
+  -> switch
+  -> contract
+```
+
+이 규칙은 완벽한 안전을 보장하지 않는다. 하지만 위험한 변경을 무심코 넣는 일은 줄여준다. 운영 마이그레이션에서 중요한 것은 천재적인 판단보다 반복 가능한 제동 장치다.
+
+## 최종 실행 순서
+
+dev ECS 전환과 Flyway adoption 리허설의 큰 흐름은 이렇게 정리했다.
+
+```text
+[local greenfield]
+  local DB drop/recreate
+  -> Flyway V001/V002/R__local_seed 실행
+  -> ddl-auto=validate
+  -> local API smoke
+
+[dev rehearsal]
+  snapshot restore
+  -> SSM tunnel
+  -> readiness check
+  -> reconcile dry-run
+  -> reconcile
+  -> readiness check
+  -> flyway baseline version 2
+  -> flyway migrate no-op 검증
+  -> cleanup
+
+[dev cutover]
+  final snapshot
+  -> old stack destroy, EIP 보존
+  -> new foundation apply, EIP 재사용
+  -> data apply, snapshot restore
+  -> bootstrap-db-users.sh
+  -> adoption readiness/reconcile/baseline
+  -> app apply
+  -> deploy_image.sh dev <digest>
+  -> DNS repoint
+  -> smoke 검증
+
+[stag]
+  dev에서 검증한 adoption 절차를 같은 방식으로 반복
+
+[prod]
+  greenfield라면 bootstrap 후 V001부터 Flyway migrate
+```
+
+## 배운 것들
+
+첫 번째, baseline은 주장이다. 참이 되기 전에 등록하면 안 된다. Flyway가 history를 만들어주는 것은 맞지만, 그 history가 현실과 같은지는 사람이 검증해야 한다.
+
+두 번째, reference data 회귀는 눈으로 잘 안 잡힌다. 용어 count, dump diff, readiness SQL처럼 기계적으로 비교할 수 있는 장치가 필요하다.
+
+세 번째, one-off task는 앱을 다른 목적으로 켜는 것이다. 웹 서버, scheduler, health check, secret, IAM policy를 모두 migration 목적에 맞게 다시 봐야 한다.
+
+네 번째, 기존 DB를 보존하면 데이터뿐 아니라 object owner도 보존된다. 미래 migration 실행 계정이 기존 테이블 owner가 아니면 첫 `ALTER TABLE`에서 터진다.
+
+다섯 번째, Terraform provider 문서보다 plan이 진실이다. RDS engine version처럼 문서상 기대와 provider 실동작이 다를 수 있는 곳은 반드시 plan으로 확인해야 한다.
+
+여섯 번째, 도구의 수명이 짧아도 실행 가능한 문서로서 가치는 있다. adoption 리허설 스크립트는 환경당 한두 번 쓰고 끝나겠지만, 그 절차와 산출물은 나중에 “우리가 어떻게 이 DB를 Flyway에 편입했는가”를 설명해준다.
+
+결국 이번 작업에서 Flyway는 중심이었지만 전부는 아니었다. Flyway는 history를 맡았다. ECS one-off task는 실행 경계를 맡았다. bootstrap은 DB role과 secret을 맡았다. adoption checklist는 기존 DB가 history를 받아들일 준비가 됐는지 증명했다. 병원 온보딩 API와 관리자 생성 정책은 Flyway 바깥으로 빠졌다.
+
+DB migration 체계를 만든다는 것은 SQL 파일을 정리하는 일이 아니라, 운영 데이터의 소유권과 실행 경계를 다시 그리는 일이었다.
