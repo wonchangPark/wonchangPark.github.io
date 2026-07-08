@@ -1,0 +1,318 @@
+---
+title: "ECR을 Terraform에 편입하고 배포 추적성을 복구한 기록"
+description: "수동 관리되던 ECR repository를 Terraform import block으로 편입하고, immutable tag, scan-on-push, prevent_destroy, git-sha 태그, 배포 전 digest 검증까지 정리한 기록입니다."
+pubDate: 2026-07-08
+category: "Infra / Deployment"
+tags: ["ECR", "Terraform", "Deployment", "Traceability"]
+techStacks: ["AWS / Infra"]
+featured: false
+priority: 10
+proof: "ECR 하드닝과 git-sha 추적"
+---
+
+ECR 라이프사이클 정책 때문에 stag가 내려간 뒤 가장 먼저 확인한 것은 "왜 이 정책이 Terraform 밖에 있었는가"였습니다. 장애의 직접 원인은 최근 5개 이미지만 유지하는 lifecycle rule이었지만, 더 깊은 원인은 운영에 중요한 ECR repository가 코드로 관리되지 않았다는 점이었습니다.
+
+이 글은 ECR을 Terraform에 편입하고, 이미지 보존 정책과 tag 불변성, 배포 전 검증, git SHA 추적성을 한 번에 정리한 기록입니다.
+
+## 시리즈
+
+- [ECS Fargate에 capacity provider와 오토스케일링을 붙인 기록](/posts/ecs-capacity-provider-autoscaling/)
+- [ECR 라이프사이클 정책 때문에 stag ECS가 내려간 장애 복구기](/posts/ecs-ecr-lifecycle-outage-recovery/)
+- [CloudWatch 알람과 AWS Chatbot으로 ECS 장애를 Slack에 연결하기](/posts/ecs-cloudwatch-slack-chatbot-monitoring/)
+- [ECR을 Terraform에 편입하고 배포 추적성을 복구한 기록](/posts/ecr-terraform-traceable-deployments/)
+- [ALB access log로 장애 시간대 요청을 남기는 구조](/posts/alb-access-log-for-settlement/)
+- [GitHub Actions OIDC로 ECS 배포 파이프라인을 만든 기록](/posts/github-actions-oidc-ecs-deployment-pipeline/)
+
+## 문제는 "이미지가 삭제됐다"에서 끝나지 않았다
+
+장애 직후 보인 표면 문제는 ECR 이미지 삭제였습니다.
+
+```text
+ECS task starts
+  -> ECR digest pull
+  -> digest not found
+  -> CannotPullContainerError
+  -> deployment circuit breaker
+  -> running task 0
+```
+
+하지만 운영적으로 더 큰 문제는 세 가지였습니다.
+
+```text
+1. ECR repository 정책이 Terraform 밖에서 수동 관리되고 있었다.
+2. git SHA 태그가 mutable이라 태그가 commit을 불변으로 보장하지 않았다.
+3. ECS task definition에 digest와 commit의 연결 정보가 남지 않았다.
+```
+
+즉, 이미지를 오래 보존하는 것만으로는 충분하지 않았습니다. "이 digest가 어떤 소스에서 왔고, 어떤 배포에서 쓰였는가"를 나중에도 설명할 수 있어야 했습니다.
+
+## Terraform import block으로 ECR 편입
+
+Terraform 1.5 이후에는 `import` block을 코드에 둘 수 있습니다. 예전처럼 CLI로 import를 한 번 실행하고 끝내는 방식보다 리뷰와 plan 검증이 쉽습니다.
+
+```hcl
+import {
+  to = aws_ecr_repository.settlement_server
+  id = "settlement/server"
+}
+```
+
+이 방식의 장점은 plan에서 편입 결과를 볼 수 있다는 점입니다.
+
+```text
+2 to import
+1 to change
+```
+
+여기서 `to import`는 기존 ECR repository와 lifecycle policy를 Terraform state로 가져오는 것입니다. `to change`는 의도한 하드닝 변경만 남아야 합니다.
+
+편입 작업은 다음 순서로 진행했습니다.
+
+```text
+1. 현재 ECR repository 설정 확인
+2. Terraform resource 작성
+3. import block 작성
+4. terraform plan으로 import와 diff 확인
+5. apply
+6. 다시 plan해서 No changes 확인
+7. import block 제거
+```
+
+마지막 단계가 중요합니다. import block은 최초 편입을 위한 코드입니다. 편입이 끝난 뒤에도 남겨둘 수는 있지만, 이후 일반 운영 코드에서는 제거하는 편이 의도가 더 선명합니다.
+
+## 하드닝 1: image tag immutability
+
+첫 번째 하드닝은 tag immutability였습니다.
+
+```hcl
+image_tag_mutability = "IMMUTABLE"
+```
+
+기존에는 같은 git SHA 태그에 다른 이미지를 다시 push할 수 있었습니다. 이 상태에서는 `abc1234`라는 태그가 항상 같은 content를 가리킨다고 믿을 수 없습니다.
+
+배포 추적성에서 git SHA 태그는 중요한 약속입니다.
+
+```text
+git SHA tag
+  -> 해당 commit으로 만든 이미지
+  -> 한 번 push되면 다른 digest로 바뀌지 않음
+```
+
+tag가 mutable이면 이 약속이 깨집니다. 장애 중에 "이 태그가 저 커밋 이미지"라고 말할 수 없게 됩니다.
+
+물론 예외 상황은 있습니다. 같은 commit을 다시 빌드해야 할 수도 있습니다. 예를 들어 base image가 바뀌었거나, 이전 빌드가 잘못됐거나, 복구를 위해 과거 commit을 재빌드해야 할 수 있습니다.
+
+그때는 명시적으로 기존 태그를 삭제하고 다시 push하면 됩니다.
+
+```text
+aws ecr batch-delete-image
+  -> 기존 tag 제거
+docker push
+  -> 새 digest로 같은 tag 생성
+```
+
+중요한 것은 실수로 덮어쓰지 못하게 하는 것입니다. 예외는 의식적으로 처리하면 됩니다.
+
+## 하드닝 2: scan-on-push
+
+두 번째는 scan-on-push입니다.
+
+```hcl
+image_scanning_configuration {
+  scan_on_push = true
+}
+```
+
+기본 스캔만으로 모든 보안 문제를 해결할 수는 없습니다. 하지만 컨테이너 이미지 취약점 정보를 자동으로 남기는 최소선으로는 충분히 가치가 있습니다.
+
+이 작업의 목표는 보안 플랫폼을 새로 만드는 것이 아니라 ECR repository의 운영 기본값을 상식적인 수준으로 끌어올리는 것이었습니다. scan-on-push는 그 기본값에 포함된다고 봤습니다.
+
+## 하드닝 3: prevent_destroy
+
+세 번째는 `prevent_destroy`입니다.
+
+```hcl
+lifecycle {
+  prevent_destroy = true
+}
+```
+
+ECR repository는 단순 캐시가 아닙니다. ECS가 새 태스크를 띄울 때 반드시 접근해야 하는 배포 아티팩트 저장소입니다. repository가 삭제되면 과거 task definition이 전부 기동 불가능해질 수 있습니다.
+
+Terraform에서 실수로 ECR repository를 삭제하는 일은 매우 큰 blast radius를 가집니다. 그래서 삭제가 필요하면 lifecycle을 먼저 의식적으로 풀어야 하도록 만들었습니다.
+
+운영 리소스에 `prevent_destroy`를 무조건 붙이는 것은 답이 아닙니다. 하지만 ECR처럼 배포 이력과 runtime 기동 가능성에 직접 연결되는 저장소에는 꽤 합리적입니다.
+
+## 하드닝 4: 180일 보존 정책
+
+기존 정책은 최근 5개 이미지만 유지했습니다. 이 정책은 dev 빌드가 몇 번만 쌓여도 stag에서 오래 실행 중인 이미지를 삭제할 수 있었습니다.
+
+새 정책은 시간 기반 보존으로 바꿨습니다.
+
+```text
+tagged image
+  -> 180일 보존
+```
+
+개수 기반 정책은 환경별 배포 주기가 다를 때 위험합니다.
+
+```text
+dev
+  - 자주 배포
+  - 이미지가 빠르게 쌓임
+
+stag
+  - 상대적으로 덜 배포
+  - 오래된 digest가 계속 실행될 수 있음
+```
+
+같은 repository를 공유한다면 "최근 N개"는 dev의 속도에 의해 stag 이미지가 지워지는 구조가 됩니다. 시간 기반 보존은 적어도 일정 기간 안에는 환경 간 배포 주기 차이를 흡수합니다.
+
+`untagged` 이미지를 짧게 삭제하는 룰은 넣지 않았습니다. buildx와 attestation이 만드는 child manifest가 untagged처럼 보이는 경우가 있고, 이를 삭제하면 tagged 이미지 pull이 깨질 수 있기 때문입니다.
+
+## 배포 전 digest 존재 확인
+
+ECR 정책을 고쳤다고 해서 배포 스크립트가 아무 digest나 믿어도 되는 것은 아닙니다. 배포 전에 실제로 ECR에 해당 digest가 존재하는지 확인하도록 했습니다.
+
+기대하는 실패 방식은 이것입니다.
+
+```text
+배포 script 시작
+  -> image_ref 해석
+  -> ECR에 digest 존재 확인
+  -> 없으면 즉시 중단
+  -> 최근 이미지 목록과 설명 출력
+```
+
+반대로 피해야 할 실패 방식은 이것입니다.
+
+```text
+task definition 등록
+  -> ECS deployment 시작
+  -> 새 task image pull 실패
+  -> service unhealthy
+  -> circuit breaker
+```
+
+실패는 가능한 한 빨리, 서비스 상태를 건드리기 전에 나야 합니다.
+
+이 preflight check는 라이프사이클 만료뿐 아니라 잘못된 digest 입력, 권한 문제, repository 오타도 빨리 잡아줍니다.
+
+## git SHA 역해석
+
+배포 스크립트는 image digest만 받지 않습니다. digest가 어떤 git SHA 태그와 연결되는지도 확인합니다.
+
+ECR image는 보통 다음 형태의 tag를 가집니다.
+
+```text
+git SHA tag
+latest 또는 main marker
+```
+
+배포할 digest가 정해지면 ECR metadata를 조회해 해당 digest에 붙은 git SHA 태그를 찾습니다. 그리고 그 값을 task definition에 두 군데 남깁니다.
+
+```text
+1. ECS task definition resource tag
+   key   = git-sha
+   value = <commit sha>
+
+2. container environment variable
+   APP_GIT_SHA=<commit sha>
+```
+
+resource tag는 운영자가 AWS API로 task definition을 조회할 때 유용합니다.
+
+```bash
+aws ecs describe-task-definition \
+  --task-definition settlement-stag-service:23 \
+  --include TAGS
+```
+
+환경변수는 애플리케이션 내부에서 버전을 노출하거나 로그에 남길 때 유용합니다.
+
+이제 ECR 이미지가 나중에 삭제되더라도 task definition만 남아 있으면 어떤 commit이 배포됐는지 알 수 있습니다. 장애 복구 때 shell history를 뒤지는 일을 줄일 수 있습니다.
+
+## dirty worktree 빌드 거부
+
+빌드 스크립트에도 가드를 넣었습니다. git SHA 태그가 정확하려면 이미지에 들어간 소스가 해당 commit과 같아야 합니다.
+
+dirty worktree 상태에서 이미지를 빌드하면 이런 일이 생깁니다.
+
+```text
+git commit: abc1234
+working tree: 수정 사항 있음
+docker image tag: abc1234
+image content: abc1234 + uncommitted changes
+```
+
+이 이미지는 태그가 거짓말을 합니다. 나중에 `abc1234`로 checkout해서 재빌드해도 같은 동작이 나오지 않을 수 있습니다.
+
+그래서 기본적으로 dirty worktree 빌드를 거부했습니다.
+
+```text
+working tree dirty
+  -> build 중단
+  -> 정말 필요하면 ALLOW_DIRTY=1로 명시적 우회
+```
+
+우회 경로를 완전히 막지는 않았습니다. 장애 대응 중에는 예외가 필요할 수 있습니다. 하지만 예외는 환경변수로 분명하게 표현해야 합니다.
+
+## immutable tag 사전 확인
+
+ECR tag를 immutable로 바꾸면 같은 tag를 다시 push할 때 ECR이 거부합니다. 문제는 Docker build가 끝난 뒤 push 단계에서야 실패하면 시간이 낭비된다는 점입니다.
+
+그래서 빌드 전에 같은 git SHA tag가 이미 ECR에 있는지 확인하도록 했습니다.
+
+```text
+tag exists
+  -> 기존 digest 출력
+  -> 재사용 안내
+  -> 필요하면 명시적으로 삭제 후 재빌드
+
+tag not exists
+  -> build 진행
+```
+
+이 가드는 CI에서도 좋습니다. 같은 commit에 대해 build workflow가 재실행됐을 때 이미 이미지가 있으면 멱등하게 넘어갈 수 있습니다.
+
+## 로컬 전용 스크립트를 트래킹으로 전환
+
+작업 중 덤으로 발견한 문제가 있었습니다. 배포 관련 스크립트가 gitignore로 로컬 전용처럼 관리되고 있었습니다.
+
+이 방식은 처음에는 편합니다. 하지만 여러 사람이 배포하는 순간 위험합니다.
+
+```text
+내 머신의 deploy script
+동료 머신의 deploy script
+CI runner의 deploy script
+문서에 적힌 deploy script
+```
+
+이 네 가지가 다르면 운영 절차가 코드로 고정되지 않습니다. 실제로 이번 장애에서 6월 27일 배포 기록은 현재 로컬 머신에 남아 있지 않았습니다.
+
+그래서 배포 스크립트를 트래킹 대상으로 전환했습니다. 스크립트 자체가 리뷰 대상이 되고, 배포 가드도 팀 전체가 공유하게 됩니다.
+
+## 정리
+
+ECR 작업의 핵심은 저장 비용 최적화가 아니었습니다. 배포 아티팩트의 신뢰성을 회복하는 일이었습니다.
+
+정리하면 이렇게 바뀌었습니다.
+
+| Before | After |
+| --- | --- |
+| ECR repository 수동 관리 | Terraform state에 편입 |
+| tag mutable | git SHA tag immutable |
+| 최근 5개 이미지 유지 | tagged image 180일 보존 |
+| 스캔 없음 | scan-on-push |
+| 실수 삭제 가능 | prevent_destroy |
+| 배포 전 digest 검증 없음 | ECR 존재 확인 후 배포 |
+| task definition에 digest만 있음 | git-sha tag와 APP_GIT_SHA 기록 |
+| 로컬 전용 배포 스크립트 | git으로 추적되는 배포 절차 |
+
+장애 이후에 가장 강하게 남은 문장은 이것입니다.
+
+```text
+컨테이너 이미지는 빌드 산출물이 아니라 운영 중인 서비스가 다시 기동하기 위한 원본이다.
+```
+
+그 원본을 오래 보존하고, 코드로 관리하고, 어떤 소스에서 왔는지 설명 가능하게 만드는 것이 이 작업의 목표였습니다.

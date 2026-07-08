@@ -1,0 +1,242 @@
+---
+title: "ECR 라이프사이클 정책 때문에 stag ECS가 내려간 장애 복구기"
+description: "ECS service 재생성 과정에서 ECR에 남아 있지 않은 digest를 pull하려다 stag 태스크가 모두 뜨지 못한 장애와, 커밋 역추적부터 재빌드 복구까지의 과정을 정리했습니다."
+pubDate: 2026-07-08
+category: "Incident / Reliability"
+tags: ["ECR", "ECS", "Incident", "Docker"]
+techStacks: ["AWS / Infra", "Java / Spring"]
+featured: false
+priority: 8
+proof: "ECR 만료 이미지 장애 복구"
+---
+
+이 글은 ECS capacity provider와 오토스케일링을 적용하던 중 실제로 발생한 stag 장애의 기록입니다. 장애의 직접 원인은 ECR 라이프사이클 정책이었습니다. 더 정확히 말하면, "최근 5개 이미지만 유지"하는 정책이 오래된 stag 이미지를 삭제했고, ECS service 재생성 시 새 태스크가 그 이미지를 다시 pull하지 못했습니다.
+
+겉으로는 이미지 저장소 정리 정책처럼 보였지만, 실제로는 가용성 설정이었습니다. 이 장애를 겪고 나서 ECR 보존 정책, 배포 추적성, 알람, CI/CD의 우선순위가 완전히 바뀌었습니다.
+
+## 시리즈
+
+- [ECS Fargate에 capacity provider와 오토스케일링을 붙인 기록](/posts/ecs-capacity-provider-autoscaling/)
+- [ECR 라이프사이클 정책 때문에 stag ECS가 내려간 장애 복구기](/posts/ecs-ecr-lifecycle-outage-recovery/)
+- [CloudWatch 알람과 AWS Chatbot으로 ECS 장애를 Slack에 연결하기](/posts/ecs-cloudwatch-slack-chatbot-monitoring/)
+- [ECR을 Terraform에 편입하고 배포 추적성을 복구한 기록](/posts/ecr-terraform-traceable-deployments/)
+- [ALB access log로 장애 시간대 요청을 남기는 구조](/posts/alb-access-log-for-settlement/)
+- [GitHub Actions OIDC로 ECS 배포 파이프라인을 만든 기록](/posts/github-actions-oidc-ecs-deployment-pipeline/)
+
+## 증상
+
+stag에 capacity provider와 오토스케일링을 적용하는 plan은 dev와 거의 같았습니다. cluster에 provider를 등록하고, service의 launch type을 capacity provider strategy로 전환하고, autoscaling target과 policy를 붙이는 흐름이었습니다.
+
+문제는 service 재생성 이후 발생했습니다. 새 service가 태스크를 띄우지 못했습니다.
+
+```text
+(service settlement-stag-service) was unable to place a task.
+
+Reason:
+CannotPullContainerError:
+pull image manifest has been retried 7 time(s):
+failed to resolve ref .../settlement/server@sha256:c721e3bc...: not found.
+
+deployment failed: tasks failed to start. (circuit breaker)
+running: 0
+```
+
+ECS deployment circuit breaker가 발동했고, 서비스는 running task 0개 상태가 됐습니다. ALB 뒤에 healthy target이 없으니 stag는 내려간 상태였습니다.
+
+처음 봤을 때 이상한 점은 이것이었습니다.
+
+```text
+방금까지 같은 digest로 멀쩡히 돌고 있었다.
+그런데 새 태스크는 같은 digest를 pull하지 못한다.
+```
+
+이 모순처럼 보이는 현상을 이해해야 원인을 찾을 수 있었습니다.
+
+## 왜 방금까지는 멀쩡했나
+
+러닝 중인 ECS task는 매 순간 ECR에서 이미지를 다시 pull하지 않습니다. 태스크가 처음 시작될 때 이미지를 pull하고, 컨테이너 런타임은 내려받은 이미지로 프로세스를 실행합니다.
+
+따라서 ECR에서 원본 이미지가 삭제되어도 이미 떠 있는 태스크는 바로 죽지 않습니다.
+
+```text
+이미 떠 있는 task
+  -> 이미지를 이미 pull함
+  -> ECR 원본이 사라져도 계속 실행 가능
+
+새로 뜨는 task
+  -> ECR에서 digest를 pull해야 함
+  -> digest가 삭제되어 있으면 시작 실패
+```
+
+이 차이가 장애의 핵심이었습니다. 기존 stag 태스크는 오래전에 이미 이미지를 pull했기 때문에 계속 살아 있었습니다. 하지만 service 재생성은 새 태스크를 필요로 했고, 새 태스크는 ECR에서 이미지를 다시 가져와야 했습니다. 그 순간 삭제된 digest 문제가 드러났습니다.
+
+## 원인: 최근 5개 이미지만 유지하는 ECR 정책
+
+ECR repository를 확인해보니 라이프사이클 정책이 최근 5개 이미지만 유지하도록 되어 있었습니다. stag가 실행 중이던 이미지는 열흘 전 배포분이었고, 그 사이 dev 빌드가 쌓이면서 ECR에서 조용히 만료되어 삭제된 상태였습니다.
+
+이 정책은 개발 초반에는 합리적으로 보일 수 있습니다.
+
+```text
+이미지가 계속 쌓인다
+ECR 저장 비용이 늘어난다
+최근 몇 개만 남기면 된다
+```
+
+하지만 ECS처럼 태스크가 언제든 새로 뜰 수 있는 환경에서는 위험합니다.
+
+```text
+service replacement
+scale out
+spot interruption 이후 재배치
+AZ 장애 이후 재배치
+task health check 실패 후 replacement
+deployment rollback
+```
+
+이 모든 상황에서 ECS는 이미지를 다시 pull합니다. 이미지가 ECR에 남아 있지 않으면 애플리케이션 코드가 정상이든 아니든 태스크는 시작조차 못 합니다.
+
+특히 이번 작업은 FARGATE_SPOT과 autoscaling을 도입하는 작업이었습니다. 즉, 태스크 교체가 더 자주 일어나는 구조로 바꾸고 있었습니다. 그런 구조에서 짧은 ECR 보존 정책은 비용 최적화가 아니라 장애 조건이 됩니다.
+
+## 장애의 더 큰 문제: digest에서 커밋을 알 수 없었다
+
+이미지가 삭제된 것만으로도 문제였지만, 복구를 어렵게 만든 진짜 문제는 따로 있었습니다.
+
+```text
+문제의 digest가 어떤 git commit으로 만들어졌는지 알 수 없었다.
+```
+
+ECS task definition에는 이미지 digest URI만 남아 있었습니다. ECR에서 해당 이미지와 태그가 삭제됐으니 ECR을 통해 digest에서 git SHA 태그를 역추적할 수도 없었습니다.
+
+만약 task definition에 `git-sha` 태그가 남아 있었다면 바로 해당 커밋으로 재빌드하면 됐을 것입니다. 하지만 당시에는 그런 추적성 장치가 없었습니다.
+
+그래서 복구는 포렌식으로 시작했습니다.
+
+## 포렌식 1: ECS task definition 리비전 히스토리
+
+먼저 ECS task definition 리비전들을 확인했습니다. 각 리비전의 등록 시각과 이미지 digest를 나열해 문제의 digest가 언제 등록됐는지 찾았습니다.
+
+```text
+settlement-stag-service:...
+  registeredAt: 2026-06-27 21:18
+  image: .../settlement/server@sha256:c721e3bc...
+```
+
+이 시점은 중요했습니다. 이미지 digest 자체는 커밋을 알려주지 않지만, task definition 등록 시각은 배포 시각에 가깝습니다. 그 시간대를 기준으로 git history를 좁힐 수 있었습니다.
+
+## 포렌식 2: 로컬 shell history
+
+다음으로 로컬 zsh history를 뒤졌습니다.
+
+```text
+deploy_image.sh stag ...
+deploy-to-ecr.sh ...
+```
+
+하지만 마지막 stag 배포 기록은 6월 23일 근처였습니다. 문제의 task definition은 6월 27일 21시 18분에 등록되어 있었습니다. 즉, 6월 27일 배포는 이 로컬 머신에서 실행된 것이 아니었습니다.
+
+이 사실은 앞서 발견한 tfvars 드리프트와도 맞물렸습니다. 실제 러닝 digest는 최신인데 Terraform tfvars는 예전 digest를 가리키고 있었습니다. 동료 머신 또는 다른 환경에서 배포가 실행됐고, 로컬에만 있는 배포 스크립트와 tfvars 동기화 규칙이 깨진 것으로 추정했습니다.
+
+## 포렌식 3: 로컬 Docker image cache
+
+혹시 로컬 Docker cache에 삭제된 digest가 남아 있을 수도 있었습니다.
+
+```text
+docker images --digests
+docker image inspect ...
+```
+
+하지만 문제의 digest는 없었습니다. ECR에서도 사라졌고, 로컬 cache에도 없었습니다. 그대로 원본 이미지를 복구하는 길은 막혔습니다.
+
+## 포렌식 4: git main 브랜치 타임라인
+
+남은 단서는 배포 시각뿐이었습니다. task definition 등록 시각 직전의 backend main 브랜치 타임라인을 확인했습니다.
+
+문제의 리비전은 6월 27일 21시 18분에 등록되어 있었고, 그 약 76분 전에 main에 머지된 커밋이 있었습니다. "그날 저녁 머지 후 stag 배포"라는 정황이 가장 유력했습니다.
+
+완벽한 증거는 아니었습니다. 하지만 다음 조건을 모두 만족했습니다.
+
+```text
+task definition 등록 시각과 가깝다
+stag에 반영될 만한 main 머지다
+다른 배포 기록은 로컬에 없다
+기존 digest가 삭제되어 더 직접적인 확인은 불가능하다
+```
+
+장애 복구에서는 완벽한 추적 정보가 없을 때도 판단해야 합니다. 그래서 해당 커밋으로 worktree를 만들고, 당시 Dockerfile과 소스를 기준으로 이미지를 재빌드하기로 했습니다.
+
+## 복구: 같은 소스 커밋으로 재빌드하고 수동 배포
+
+재빌드한 이미지는 원래 digest와 같지 않습니다. Docker build는 빌드 시각, base image 상태, layer metadata 등에 따라 deterministic하지 않을 수 있습니다. 하지만 소스 커밋과 Dockerfile이 같다면 애플리케이션 코드 관점에서는 같은 버전을 복원하는 것에 가깝습니다.
+
+복구 흐름은 이랬습니다.
+
+```text
+1. 의심 커밋으로 git worktree 생성
+2. 당시 Dockerfile 기준으로 이미지 빌드
+3. ECR에 새 digest로 push
+4. Terraform task definition image를 새 digest로 교체
+5. ECS update-service로 새 task definition 배포
+6. /health 확인
+```
+
+여기서 평소 배포 스크립트를 그대로 쓰지 않았습니다. 당시 이미지는 Flyway 도입 이전 코드였습니다. 그런데 현재 배포 스크립트는 rollout 전에 Flyway one-off migration task를 무조건 실행하는 구조였습니다.
+
+```text
+deploy_image.sh
+  -> migration one-off task
+  -> service rollout
+```
+
+Flyway 도입 이전 코드로 migration 경로를 태우면 예기치 않은 동작을 할 수 있었습니다. 그래서 migration 스텝을 우회하고 task definition 교체와 ECS service update를 수동으로 진행했습니다.
+
+복구의 목표는 "정확히 같은 digest를 되살리는 것"이 아니라 "stag가 직전에 실행하던 코드 버전에 가장 가까운 이미지를 다시 pull 가능한 상태로 만들고 서비스 healthy를 복구하는 것"이었습니다.
+
+## 즉시 조치: 라이프사이클 정책 수정
+
+복구 후 바로 ECR 라이프사이클 정책을 손봤습니다. 최근 5개 유지 정책은 폐기했습니다. 이후 Terraform 편입 과정에서 180일 보존 정책으로 정리했습니다.
+
+또 하나 중요한 결정을 했습니다. `untagged` 이미지를 짧게 만료시키는 룰은 쓰지 않기로 했습니다.
+
+Docker buildx와 image attestation을 쓰면 tagged 이미지와 연결된 child manifest가 untagged처럼 보이는 경우가 있습니다. 이 untagged child manifest를 lifecycle rule이 지워버리면 겉으로는 tagged 이미지가 남아 있어도 pull이 깨질 수 있습니다.
+
+이미지 정리는 단순히 "태그 없는 것 삭제"가 아닙니다. multi-arch manifest, attestation, digest reference 방식까지 함께 봐야 합니다.
+
+## 장애가 남긴 세 가지 교훈
+
+첫째, 러닝 태스크는 레지스트리 상태를 보증하지 않습니다.
+
+```text
+running task healthy
+  != ECR에 해당 image digest가 존재함
+```
+
+service replacement나 scale out 전에는 이미지가 실제로 pull 가능한지 확인해야 합니다. 특히 digest pinning을 쓰는 경우 ECR에서 해당 digest가 사라지면 태그가 있든 없든 새 태스크는 실패합니다.
+
+둘째, digest만으로는 배포를 설명할 수 없습니다.
+
+```text
+sha256:c721e3bc...
+```
+
+이 값은 이미지 content address일 뿐입니다. 운영자가 장애 중에 알고 싶은 것은 "이 이미지가 어떤 git commit에서 나왔는가", "누가 언제 배포했는가", "이 버전과 DB migration의 관계가 무엇인가"입니다. 그래서 이후 task definition에 `git-sha` 태그와 `APP_GIT_SHA` 환경변수를 넣었습니다.
+
+셋째, 배포 기록이 개인 머신에 흩어져 있으면 장애 복구는 포렌식부터 시작합니다.
+
+로컬 shell history, 로컬 Docker cache, 로컬 tfvars는 운영 기록의 원본이 될 수 없습니다. 여러 사람이 배포하는 순간 깨집니다. 그래서 배포 기록은 CI/CD와 AWS 리소스 안에 남아야 합니다.
+
+## 재발 방지 체크리스트
+
+이 장애 이후 다음 항목을 작업 목록으로 올렸고 실제로 이어서 처리했습니다.
+
+| 항목 | 이유 |
+| --- | --- |
+| ECR lifecycle 180일 보존 | 오래된 환경도 service replacement 가능해야 함 |
+| ECR Terraform 편입 | 콘솔 수동 정책이 다시 생기지 않게 함 |
+| image tag immutable | git SHA 태그가 다른 digest를 가리키지 않게 함 |
+| 배포 전 digest 존재 확인 | 삭제된 digest로 task definition 등록 방지 |
+| task definition git-sha 태그 | ECR 이미지가 삭제되어도 커밋 추적 가능 |
+| CloudWatch/EventBridge 알람 | deployment failure와 placement failure 즉시 감지 |
+| GitHub Actions 배포 | 개인 머신 shell history 의존 제거 |
+| SSM deployed-image 기록 | Terraform apply가 과거 이미지로 되돌리지 않게 함 |
+
+장애는 불편했지만, 좋은 압박이 되었습니다. 숨어 있던 리스크가 실제로 터졌고, 그래서 "언젠가 해야 할 운영 개선"이 같은 날 바로 작업 목록으로 올라왔습니다.

@@ -1,0 +1,248 @@
+---
+title: "CloudWatch 알람과 AWS Chatbot으로 ECS 장애를 Slack에 연결하기"
+description: "ECS 배포 실패, 태스크 배치 실패, ALB healthy target 소실, RDS 자원 고갈까지 CloudWatch와 EventBridge 알람을 구성하고 AWS Chatbot으로 Slack에 연결한 기록입니다."
+pubDate: 2026-07-08
+category: "Observability / Infra"
+tags: ["CloudWatch", "EventBridge", "AWS Chatbot", "Slack"]
+techStacks: ["AWS / Infra"]
+featured: false
+priority: 9
+proof: "ECS 장애 알람과 Slack 연동"
+---
+
+ECR 라이프사이클 정책 때문에 stag ECS가 내려갔을 때 가장 먼저 든 생각은 이것이었습니다. "이 작업을 보고 있지 않았다면 언제 알았을까?"
+
+답은 불편했습니다. 알람이 없었기 때문에 늦게 알았을 가능성이 큽니다. ALB target이 0개가 되고, ECS deployment circuit breaker가 발동하고, 태스크가 image pull 실패로 계속 죽어도 Slack에 아무것도 오지 않는 구조였습니다.
+
+그래서 장애 복구 직후 CloudWatch 알람, EventBridge ECS 이벤트, SNS, AWS Chatbot, Slack 채널을 연결했습니다.
+
+## 시리즈
+
+- [ECS Fargate에 capacity provider와 오토스케일링을 붙인 기록](/posts/ecs-capacity-provider-autoscaling/)
+- [ECR 라이프사이클 정책 때문에 stag ECS가 내려간 장애 복구기](/posts/ecs-ecr-lifecycle-outage-recovery/)
+- [CloudWatch 알람과 AWS Chatbot으로 ECS 장애를 Slack에 연결하기](/posts/ecs-cloudwatch-slack-chatbot-monitoring/)
+- [ECR을 Terraform에 편입하고 배포 추적성을 복구한 기록](/posts/ecr-terraform-traceable-deployments/)
+- [ALB access log로 장애 시간대 요청을 남기는 구조](/posts/alb-access-log-for-settlement/)
+- [GitHub Actions OIDC로 ECS 배포 파이프라인을 만든 기록](/posts/github-actions-oidc-ecs-deployment-pipeline/)
+
+## 목표는 "많은 알람"이 아니라 "장애 경로를 놓치지 않는 것"
+
+처음부터 모든 지표에 알람을 붙이려 하지는 않았습니다. 알람이 너무 많으면 운영자는 금방 무시하게 됩니다. 이번 목적은 명확했습니다.
+
+```text
+ECS service가 실제로 내려간다
+ECS deployment가 실패한다
+태스크가 배치 또는 시작 단계에서 실패한다
+ALB가 5XX를 반환한다
+RDS와 ECS 자원이 위험 구간에 들어간다
+```
+
+특히 이번 장애의 시그니처는 세 가지였습니다.
+
+```text
+HealthyHostCount < 1
+ALB ELB 5XX 증가
+ECS SERVICE_TASK_PLACEMENT_FAILURE 또는 deployment failure
+```
+
+애플리케이션 exception 알람보다 먼저 필요한 것은 "서비스가 기동 가능한가"였습니다. 그래서 인프라 생존 신호를 먼저 잡았습니다.
+
+## 알람 구성
+
+dev와 stag에 같은 수준의 알람을 붙이지는 않았습니다. dev는 최소한의 다운 감지 중심으로 두고, stag는 prod 직전 검증 환경에 가깝게 더 넓은 지표를 봤습니다.
+
+| 알람 | 조건 | 의미 |
+| --- | --- | --- |
+| ALB HealthyHostCount | 1 미만, 3분 | healthy target이 없음 |
+| ALB UnHealthyHostCount | 1 이상, 10분 | target health check 반복 실패 |
+| ALB ELB 5XX | 5분 10건 이상 | ALB 자체 오류, target 부재, 연결 실패 |
+| ALB Target 5XX | stag 중심 | 앱이 5XX를 반환 |
+| ALB p95 latency | stag 중심 | 응답 지연 증가 |
+| ECS CPU | 85% 초과, 15분 | autoscaling max 포화 또는 부하 증가 |
+| ECS Memory | 90% 초과, 15분 | OOM 전조 |
+| RDS CPU | 85% 초과 | DB CPU 병목 |
+| RDS FreeStorageSpace | 5GB 미만 | 저장 공간 고갈 |
+| RDS DatabaseConnections | 80 초과 | connection 고갈 전조 |
+
+가장 신경 쓴 값은 HealthyHostCount의 missing data 처리였습니다.
+
+```text
+treat_missing_data = breaching
+```
+
+HealthyHostCount 알람에서 메트릭이 사라지는 것은 정상 신호가 아닐 수 있습니다. ALB target group이 대상 없음 상태가 되거나, metric stream이 비는 상황은 오히려 위험하게 봐야 합니다. 그래서 missing을 OK로 처리하지 않고 breaching으로 처리했습니다.
+
+반대로 모든 알람에 missing breaching을 쓰면 잡음이 많아질 수 있습니다. 지표 성격에 따라 다르게 봐야 합니다. 예를 들어 요청이 없어서 latency나 5XX 메트릭이 비는 것은 정상일 수 있습니다. 하지만 healthy host 수는 서비스 생존 지표이므로 더 보수적으로 잡았습니다.
+
+## ECS EventBridge 이벤트가 핵심인 이유
+
+CloudWatch metric 알람은 결과를 봅니다. ALB 5XX가 늘었는지, healthy target이 사라졌는지를 봅니다. 하지만 ECS 이벤트는 원인에 더 가깝습니다.
+
+이번 장애에서 정말 보고 싶었던 이벤트는 다음 두 가지였습니다.
+
+```text
+SERVICE_DEPLOYMENT_FAILED
+SERVICE_TASK_PLACEMENT_FAILURE
+```
+
+`SERVICE_DEPLOYMENT_FAILED`는 deployment circuit breaker가 발동했을 때 중요합니다. 새 task definition 배포가 실패하고 rollback 또는 failure 상태에 들어갔다는 뜻입니다.
+
+`SERVICE_TASK_PLACEMENT_FAILURE`는 이름만 보면 capacity 부족처럼 보이지만, 실제로는 이미지 pull 실패 같은 시작 단계 문제도 잡을 수 있습니다. 이번 장애의 메시지도 ECS service event에 남았습니다.
+
+```text
+CannotPullContainerError
+failed to resolve ref ... not found
+```
+
+이 이벤트는 metric보다 설명력이 좋습니다. Slack 메시지에 event detail을 담으면 운영자가 콘솔에 들어가기 전에도 문제 방향을 잡을 수 있습니다.
+
+## SNS와 AWS Chatbot을 선택한 이유
+
+Slack 연동 방식은 크게 세 가지가 있었습니다.
+
+```text
+1. Slack incoming webhook
+2. Slack bot token을 직접 관리
+3. AWS Chatbot
+```
+
+이번에는 AWS Chatbot을 선택했습니다.
+
+이유는 간단합니다. webhook URL이나 bot token을 직접 secret으로 들고 있지 않아도 됩니다. CloudWatch alarm과 EventBridge rule이 SNS topic으로 메시지를 보내고, AWS Chatbot이 그 SNS topic을 구독해서 Slack channel에 게시합니다.
+
+```text
+CloudWatch Alarm
+EventBridge Rule
+  -> SNS Topic
+  -> AWS Chatbot Slack channel configuration
+  -> Slack
+```
+
+운영 경계도 명확합니다. AWS 계정 안에서 알람 전달 경로를 Terraform으로 관리하고, Slack workspace에는 AWS Chatbot 앱을 설치해 채널에 초대합니다.
+
+## EventBridge 메시지 포맷
+
+CloudWatch alarm은 SNS로 보내면 Chatbot이 어느 정도 보기 좋게 렌더링합니다. 하지만 EventBridge 이벤트를 그대로 보내면 Slack 메시지가 읽기 어려울 수 있습니다.
+
+그래서 EventBridge input transformer로 Chatbot custom notification 포맷을 만들었습니다.
+
+```json
+{
+  "version": "1.0",
+  "source": "custom",
+  "content": {
+    "textType": "client-markdown",
+    "title": "ECS deployment failed",
+    "description": "cluster, service, event name, reason..."
+  }
+}
+```
+
+이 포맷을 쓰면 Slack에서 제목과 설명이 분리되어 보입니다. 운영자가 알림을 빠르게 스캔할 수 있습니다.
+
+메시지에는 최소한 다음 정보를 담도록 했습니다.
+
+```text
+environment
+cluster name
+service name
+event name
+reason or detail
+AWS console에서 찾을 수 있는 식별자
+```
+
+알람은 "시끄럽게 울리는 것"보다 "보고 바로 다음 행동을 알 수 있는 것"이 중요합니다.
+
+## Chatbot에서 만난 첫 번째 제약: 채널당 설정 1개
+
+처음에는 dev와 stag 각각의 Terraform stack에서 Chatbot Slack channel configuration을 만들려고 했습니다.
+
+```text
+dev app stack
+  -> chatbot config for same Slack channel
+
+stag app stack
+  -> chatbot config for same Slack channel
+```
+
+하지만 stag apply에서 실패했습니다. AWS Chatbot은 같은 AWS 계정 안에서 같은 Slack workspace와 channel 조합에 대해 설정을 하나만 허용합니다.
+
+즉, 환경별로 같은 채널을 가리키는 Chatbot 설정을 여러 개 만들 수 없습니다.
+
+해법은 Chatbot을 환경별 app stack에서 빼는 것이었습니다. 대신 계정 공용 shared stack으로 분리했습니다.
+
+```text
+live/shared/chatbot
+  - Slack workspace/channel configuration 1개
+  - dev alerts topic 구독
+  - stag alerts topic 구독
+```
+
+dev와 stag의 monitoring module은 각자 SNS topic과 alarm을 만들고, shared chatbot stack은 remote state를 통해 각 topic ARN을 읽어 하나의 Slack channel configuration에 연결합니다.
+
+이 구조가 더 자연스러웠습니다. Slack channel은 환경별 리소스라기보다 계정 공용 알림 수신 지점에 가깝기 때문입니다.
+
+## Chatbot에서 만난 두 번째 제약: API 리전
+
+또 하나의 제약은 API 리전이었습니다. 정산 서비스 인프라는 서울 리전 중심이지만 AWS Chatbot API는 서울 리전에서 바로 다룰 수 없었습니다. 리소스는 글로벌 성격이지만 Terraform provider는 지원되는 리전 endpoint를 사용해야 했습니다.
+
+그래서 provider alias를 두었습니다.
+
+```hcl
+provider "aws" {
+  region = "ap-northeast-2"
+}
+
+provider "aws" {
+  alias  = "chatbot"
+  region = "us-east-2"
+}
+```
+
+Chatbot 리소스만 alias provider를 사용하도록 분리했습니다. CloudWatch, EventBridge, SNS는 서울 리전 리소스이고, Chatbot configuration만 지원 리전 API로 관리합니다.
+
+이런 리전 제약은 Terraform plan만 봐서는 바로 떠오르지 않습니다. apply 단계에서 에러를 만나고 나서야 알게 되는 경우가 많습니다. 그래서 shared module로 감싸고 나면 다음 환경에서는 같은 시행착오를 반복하지 않아도 됩니다.
+
+## 비공개 Slack 채널에서의 마지막 함정
+
+Terraform apply가 성공해도 Slack 메시지가 오지 않을 수 있습니다. 특히 채널이 private이면 AWS Chatbot 앱을 채널에 직접 초대해야 합니다.
+
+```text
+/invite @AWS Chatbot
+```
+
+이 단계를 놓치면 AWS 쪽 리소스는 모두 정상인데 Slack에는 메시지가 보이지 않습니다. 인프라 구성과 Slack 앱 권한은 별개입니다.
+
+## 검증 방법
+
+알람은 반드시 실제로 울려봐야 합니다. "Terraform apply 성공"은 알람이 동작한다는 증거가 아닙니다.
+
+CloudWatch alarm은 다음 방식으로 강제 발화시켜 Slack 수신까지 확인했습니다.
+
+```bash
+aws cloudwatch set-alarm-state \
+  --alarm-name "..." \
+  --state-value ALARM \
+  --state-reason "manual test"
+```
+
+이 방식은 실제 metric 조건을 기다리지 않고 SNS와 Chatbot 전달 경로를 검증할 수 있습니다.
+
+EventBridge rule은 실제 ECS 배포 실패를 일부러 만들기는 부담이 있으므로, rule target과 input transformer를 plan/apply로 확인하고 이후 ECS 이벤트 발생 시 Slack 메시지 형식을 확인했습니다. 운영 알람은 가능하면 "가짜 알람"과 "실제 이벤트" 양쪽 경로를 모두 검증해야 합니다.
+
+## 알람을 붙이며 정리한 기준
+
+이번 작업에서 정한 기준은 다음과 같습니다.
+
+```text
+ALB healthy target 0은 즉시 봐야 한다.
+ECS deployment failure는 metric보다 event로 봐야 한다.
+image pull failure는 배치 실패 이벤트로 들어올 수 있다.
+RDS storage와 connection은 장애가 나기 전에 봐야 한다.
+dev는 최소 다운 감지, stag는 prod 리허설 수준으로 본다.
+Slack 메시지는 원인 식별자를 포함해야 한다.
+```
+
+장애가 나지 않는 시스템은 없습니다. 그래서 관측성의 1차 목표는 장애를 없애는 것이 아니라 장애를 빨리, 설명 가능한 형태로 보는 것입니다.
+
+이번 ECR 장애는 우연히 작업 중에 목격했기 때문에 바로 대응할 수 있었습니다. 다음 장애는 그럴 것이라고 기대하면 안 됩니다. 시스템이 직접 말하게 해야 합니다. 이 글의 작업은 그 말을 Slack까지 가져오는 배관을 만든 일이었습니다.

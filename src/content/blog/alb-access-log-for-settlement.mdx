@@ -1,0 +1,261 @@
+---
+title: "ALB access log로 장애 시간대 요청을 남기는 구조"
+description: "정산 서비스에서 장애 중 실제 유입 요청을 확인하기 위해 ALB access log를 S3에 적재하고, 권한, 암호화, 보존 기간, 검증 방법을 정리한 기록입니다."
+pubDate: 2026-07-08
+category: "Observability / Infra"
+tags: ["ALB", "S3", "Access Log", "Terraform"]
+techStacks: ["AWS / Infra"]
+featured: false
+priority: 11
+proof: "ALB access log 적재"
+---
+
+ECR 이미지 삭제로 stag가 내려갔을 때 또 하나의 공백이 보였습니다. 서비스가 내려간 시간대에 실제로 어떤 요청이 들어왔는지 확인할 방법이 없었습니다.
+
+애플리케이션 로그는 앱 컨테이너가 요청을 처리해야 남습니다. 하지만 이번 장애처럼 target이 하나도 뜨지 못하면 요청은 애플리케이션까지 도달하지 않습니다. 이때도 ALB는 클라이언트 요청을 받고 502 또는 503을 반환할 수 있습니다. 그래서 ALB access log가 필요했습니다.
+
+## 시리즈
+
+- [ECS Fargate에 capacity provider와 오토스케일링을 붙인 기록](/posts/ecs-capacity-provider-autoscaling/)
+- [ECR 라이프사이클 정책 때문에 stag ECS가 내려간 장애 복구기](/posts/ecs-ecr-lifecycle-outage-recovery/)
+- [CloudWatch 알람과 AWS Chatbot으로 ECS 장애를 Slack에 연결하기](/posts/ecs-cloudwatch-slack-chatbot-monitoring/)
+- [ECR을 Terraform에 편입하고 배포 추적성을 복구한 기록](/posts/ecr-terraform-traceable-deployments/)
+- [ALB access log로 장애 시간대 요청을 남기는 구조](/posts/alb-access-log-for-settlement/)
+- [GitHub Actions OIDC로 ECS 배포 파이프라인을 만든 기록](/posts/github-actions-oidc-ecs-deployment-pipeline/)
+
+## 앱 로그만으로 답할 수 없는 질문
+
+일반적인 장애 조사에서는 애플리케이션 로그를 먼저 봅니다.
+
+```text
+request id
+endpoint
+exception stacktrace
+response status
+latency
+```
+
+하지만 앱 로그는 앱이 요청을 받은 뒤에야 남습니다. target group에 healthy target이 없거나, ECS task가 시작조차 못 하거나, ALB가 target connection을 맺지 못하면 앱 로그는 비어 있습니다.
+
+이번 장애에서 알고 싶었던 질문은 이런 것이었습니다.
+
+```text
+장애 시간대에 외부 요청이 실제로 있었나?
+어떤 path로 들어왔나?
+ALB는 어떤 status를 반환했나?
+target status code는 있었나, 아니면 target에 도달하지 못했나?
+특정 client IP나 user agent 패턴이 있었나?
+장애 복구 후 5XX가 사라졌나?
+```
+
+이 질문에는 ALB access log가 더 직접적으로 답합니다.
+
+## ALB access log가 남기는 경계
+
+ALB access log는 ALB가 본 요청을 S3에 기록합니다. 그래서 애플리케이션이 죽어 있어도 ALB가 요청을 받았다면 로그가 남을 수 있습니다.
+
+단순화하면 로그 경계는 이렇습니다.
+
+```text
+client
+  -> ALB
+     -> access log 기록
+     -> target group
+        -> ECS task
+           -> app log 기록
+```
+
+target이 없으면 app log는 없지만 ALB access log는 남습니다. target이 5XX를 반환하면 ALB access log에는 ALB status code와 target status code를 나눠 볼 수 있습니다.
+
+이 차이는 장애 조사에서 중요합니다.
+
+```text
+elb_status_code = 502, target_status_code = -
+  -> ALB가 target으로 정상 전달하지 못했을 가능성
+
+elb_status_code = 200, target_status_code = 200
+  -> 정상 처리
+
+elb_status_code = 500, target_status_code = 500
+  -> 앱이 5XX 반환
+```
+
+정산 서비스처럼 장애 시간대 요청 유무와 영향 범위를 설명해야 하는 시스템에서는 이 레벨의 기록이 필요합니다.
+
+## 저장 위치: 전용 S3 버킷
+
+access log는 전용 S3 버킷에 적재했습니다.
+
+```text
+settlement-alb-access-logs-<env>
+  - public access block
+  - bucket owner enforced
+  - SSE-S3
+  - lifecycle 90일 만료
+  - ALB log delivery 권한
+```
+
+운영 로그는 별도 버킷으로 두는 편이 관리하기 쉽습니다. 앱 파일, 백업, 임시 산출물과 섞이면 권한과 lifecycle을 다르게 주기 어렵습니다.
+
+보존 기간은 90일로 잡았습니다. access log는 시간이 갈수록 양이 쌓이고, 영구 보존할 성격의 원장 데이터도 아닙니다. 장애 조사와 최근 운영 분석에 충분한 기간을 주되 비용을 제한하는 균형점으로 봤습니다.
+
+## 암호화: SSE-S3를 쓴 이유
+
+S3 기본 암호화는 SSE-S3로 설정했습니다.
+
+처음에는 KMS key를 쓰는 것도 생각할 수 있습니다. 하지만 ALB access log delivery는 KMS 암호화를 지원하지 않는 제약이 있습니다. 그래서 access log bucket에는 SSE-S3를 사용했습니다.
+
+이 선택은 보안 포기라기보다 서비스 제약 안에서의 선택입니다.
+
+```text
+가능한 것
+  - S3 public access block
+  - bucket policy 최소 권한
+  - lifecycle expiration
+  - bucket owner enforced
+  - access log prefix 분리
+  - IAM read 권한 제한
+
+불가능한 것
+  - ALB access log object를 SSE-KMS로 직접 쓰기
+```
+
+보안은 암호화 방식 하나로 끝나지 않습니다. 누가 읽을 수 있는지, 얼마나 오래 남는지, public으로 열릴 가능성이 있는지, 어떤 prefix로 쌓이는지를 함께 봐야 합니다.
+
+## 권한: 서울 리전의 ELB service account
+
+ALB가 S3에 로그를 쓰려면 bucket policy에 log delivery 주체를 허용해야 합니다. 서울 리전에서는 ELB service account principal을 사용했습니다.
+
+Terraform에서는 `aws_elb_service_account` data source를 사용할 수 있습니다.
+
+```hcl
+data "aws_elb_service_account" "main" {}
+```
+
+bucket policy는 대략 이런 성격을 가집니다.
+
+```text
+Principal
+  - 해당 리전 ELB service account
+
+Action
+  - s3:PutObject
+
+Resource
+  - access log prefix 아래 object
+
+Condition
+  - bucket-owner-full-control ACL 등 필요한 조건
+```
+
+권한은 넓게 주지 않았습니다. access log prefix 아래에 PutObject할 수 있는 정도면 충분합니다.
+
+## ALB 설정
+
+ALB resource에는 access log block을 켰습니다.
+
+```hcl
+access_logs {
+  bucket  = aws_s3_bucket.alb_logs.bucket
+  prefix  = "alb"
+  enabled = true
+}
+```
+
+prefix를 두는 이유는 나중에 Athena나 S3 inventory, lifecycle rule을 붙일 때 경로가 정리되기 때문입니다.
+
+로그 object는 보통 시간 단위 path로 쌓입니다.
+
+```text
+alb/AWSLogs/<account-id>/elasticloadbalancing/ap-northeast-2/yyyy/mm/dd/...
+```
+
+이 구조를 알면 장애 시간대 로그만 골라서 내려받거나 Athena partition을 설계하기 쉽습니다.
+
+## 검증: ELBAccessLogTestFile
+
+ALB access log 설정의 좋은 점은 검증 신호가 명확하다는 것입니다. access log를 활성화하면 ELB가 S3 쓰기 권한을 확인하기 위해 test file을 기록합니다.
+
+```text
+ELBAccessLogTestFile
+```
+
+이 파일이 버킷에 생기면 최소한 다음이 증명됩니다.
+
+```text
+ALB access log 설정이 켜져 있다
+ALB가 bucket에 PutObject할 수 있다
+bucket policy와 prefix가 맞다
+S3 public block이나 ownership 설정이 delivery를 막지 않는다
+```
+
+물론 실제 요청 로그가 쌓이는지도 시간이 지난 뒤 확인해야 합니다. 하지만 test file은 access log 전달 경로의 즉시 검증 신호로 매우 유용합니다.
+
+## access log로 볼 수 있는 장애 패턴
+
+ALB access log가 있으면 장애 조사에서 다음 패턴을 빠르게 분류할 수 있습니다.
+
+| 패턴 | 해석 |
+| --- | --- |
+| `elb_status_code` 5XX, `target_status_code` 없음 | target 부재, 연결 실패, target으로 전달 전 실패 |
+| `target_status_code` 5XX | 앱이 요청을 받아 5XX 반환 |
+| `target_processing_time` 증가 | 앱 처리 지연 |
+| `request_processing_time` 증가 | 클라이언트 요청 수신 또는 ALB 처리 지연 |
+| 특정 path에 5XX 집중 | endpoint 단위 장애 가능성 |
+| 특정 user agent 반복 | 배치, 모니터링, 외부 클라이언트 영향 확인 |
+
+CloudWatch metric은 요약을 보여줍니다. access log는 사례를 보여줍니다. 두 가지가 같이 있어야 "언제부터 몇 건"과 "어떤 요청이 실제로"를 함께 말할 수 있습니다.
+
+## 개인정보와 민감정보 관점
+
+access log는 운영에 유용하지만 민감할 수 있습니다. query string에 토큰이나 개인정보가 들어가면 그대로 로그에 남을 수 있습니다.
+
+그래서 access log를 켜는 것과 별개로 애플리케이션 API 설계도 같이 봐야 합니다.
+
+```text
+민감 값은 query string에 두지 않는다
+Authorization header 값은 ALB access log에 직접 남지 않지만 앱 로그도 함께 점검한다
+로그 읽기 IAM 권한을 제한한다
+보존 기간을 무기한으로 두지 않는다
+장애 조사 목적 외의 접근 경로를 줄인다
+```
+
+정산 도메인은 계좌, 비용, 송금, 병원 운영 정보처럼 민감한 데이터와 가까운 영역입니다. access log는 필요한 만큼만 남기고, 읽는 사람과 기간을 제한하는 것이 맞습니다.
+
+## 다음 단계: Athena 조회
+
+이번 작업에서는 우선 S3 적재와 검증까지 마쳤습니다. 다음 단계는 Athena table을 붙여서 장애 시간대 로그를 SQL로 조회할 수 있게 하는 것입니다.
+
+원하는 조회는 이런 형태입니다.
+
+```sql
+SELECT
+  time,
+  elb_status_code,
+  target_status_code,
+  request_url,
+  user_agent
+FROM alb_access_logs
+WHERE day = '2026-07-08'
+  AND time BETWEEN timestamp '2026-07-08 10:00:00'
+               AND timestamp '2026-07-08 11:00:00'
+ORDER BY time;
+```
+
+처음부터 Athena까지 한 번에 붙일 수도 있었지만, 이번 장애 직후의 우선순위는 "다음 장애 시간대 요청이 아예 사라지지 않게 하는 것"이었습니다. 조회 편의성은 그 다음 단계입니다.
+
+## 정리
+
+ALB access log 작업은 화려한 기능이 아닙니다. 하지만 장애 후 회고에서 매우 중요한 질문에 답하게 해줍니다.
+
+```text
+그 시간에 요청이 있었나?
+있었다면 어떤 요청이었나?
+ALB는 무엇을 반환했나?
+앱까지 도달했나?
+복구 후 정상 응답으로 돌아왔나?
+```
+
+앱 로그는 앱이 살아 있을 때 강합니다. ALB access log는 앱이 죽었을 때도 경계 밖에서 기록을 남깁니다. 장애가 "앱 내부 exception"이 아니라 "태스크가 뜨지 못함", "target이 없음", "배포가 실패함" 같은 인프라 장애일 때 이 차이는 큽니다.
+
+이번 작업으로 최소한 다음번에는 "다운 중에 실제 요청이 있었는지"를 추측이 아니라 로그로 확인할 수 있게 됐습니다.

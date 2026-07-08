@@ -1,0 +1,270 @@
+---
+title: "ECS Fargate에 capacity provider와 오토스케일링을 붙인 기록"
+description: "desired_count 1로 고정되어 있던 정산 서비스 dev/stag ECS를 FARGATE_SPOT, base capacity, CPU 타깃 트래킹, stopTimeout까지 포함해 재설계한 기록입니다."
+pubDate: 2026-07-08
+category: "Infra / Reliability"
+tags: ["ECS", "Fargate", "Autoscaling", "Terraform"]
+techStacks: ["AWS / Infra", "Java / Spring"]
+featured: false
+priority: 7
+proof: "ECS capacity provider 전환"
+---
+
+이 글은 2026년 7월 8일 하루 동안 진행한 ECS 인프라 개선 작업 중 첫 번째 기록입니다. 원래 목표는 단순했습니다. 정산 서비스 ECS Fargate에 capacity provider 전략을 붙이고, dev와 stag에 오토스케일링을 켜는 것이었습니다.
+
+하지만 막상 적용해보니 단순한 비용 최적화 작업이 아니었습니다. capacity provider는 서비스 생성 방식에 영향을 주고, 오토스케일링은 태스크 교체 빈도를 높이며, 태스크 교체가 잦아지는 순간 이미지 보존, 배포 추적성, 알람, access log까지 한 줄로 연결됩니다. 이 글에서는 그 시작점이었던 capacity provider와 오토스케일링 전환을 정리합니다.
+
+## 시리즈
+
+- [ECS Fargate에 capacity provider와 오토스케일링을 붙인 기록](/posts/ecs-capacity-provider-autoscaling/)
+- [ECR 라이프사이클 정책 때문에 stag ECS가 내려간 장애 복구기](/posts/ecs-ecr-lifecycle-outage-recovery/)
+- [CloudWatch 알람과 AWS Chatbot으로 ECS 장애를 Slack에 연결하기](/posts/ecs-cloudwatch-slack-chatbot-monitoring/)
+- [ECR을 Terraform에 편입하고 배포 추적성을 복구한 기록](/posts/ecr-terraform-traceable-deployments/)
+- [ALB access log로 장애 시간대 요청을 남기는 구조](/posts/alb-access-log-for-settlement/)
+- [GitHub Actions OIDC로 ECS 배포 파이프라인을 만든 기록](/posts/github-actions-oidc-ecs-deployment-pipeline/)
+
+## 시작 상태
+
+정산 서비스 인프라는 dev와 stag 환경을 가지고 있었고, 각 환경은 Terraform 스택 기준으로 대략 다음처럼 나뉘어 있었습니다.
+
+```text
+foundation
+  - VPC
+  - subnet
+  - security group
+  - KMS
+  - 공통 IAM 경계
+
+data
+  - RDS
+  - Redis
+  - DB secret shell
+  - 데이터 계층 IAM
+
+app
+  - ALB
+  - ECS cluster
+  - ECS service
+  - task definition
+  - 배포 script
+```
+
+ECS는 Fargate로 운영하고 있었지만 서비스는 환경당 태스크 1개로 고정되어 있었습니다.
+
+```text
+desired_count = 1
+launch_type   = FARGATE
+```
+
+배포도 CI/CD가 아니라 로컬 머신에서 수동으로 실행하는 방식이었습니다.
+
+```text
+deploy-to-ecr.sh
+  -> Docker build
+  -> ECR push
+
+deploy_image.sh
+  -> migration one-off task
+  -> ECS task definition 등록
+  -> ECS service rollout
+```
+
+모니터링과 알람은 없었습니다. 이 상태에서 장애가 나면 운영자가 직접 보고 있지 않은 한 늦게 알 수밖에 없었습니다.
+
+처음 보려던 것은 단 하나였습니다. Fargate 비용을 줄이면서 dev와 stag 모두 최소한의 탄력성을 갖게 하는 것. 그래서 코드를 열어봤습니다.
+
+## 이미 있던 것과 진짜 없던 것
+
+처음 예상과 다르게 Application Auto Scaling 자체는 모듈 안에 이미 구현되어 있었습니다.
+
+```text
+autoscaling_enabled
+autoscaling_min_capacity
+autoscaling_max_capacity
+cpu_target_value
+memory_target_value
+```
+
+문제는 이 값들이 dev와 stag에서 꺼져 있었다는 점이었습니다. 다시 말해 ECS service에 target tracking policy를 붙이는 코드는 있었지만 실제 환경에서는 활성화되어 있지 않았습니다.
+
+진짜 없던 것은 capacity provider였습니다.
+
+ECS service는 `launch_type = "FARGATE"`를 직접 쓰고 있었고, cluster에는 `aws_ecs_cluster_capacity_providers`가 없었습니다. 이 구조에서는 FARGATE_SPOT을 쓸 수 없습니다. Fargate on-demand와 Fargate Spot을 섞으려면 cluster에 capacity provider를 등록하고, service는 launch type 대신 capacity provider strategy로 배치 방식을 선언해야 합니다.
+
+개념을 정리하면 이렇습니다.
+
+| 구분 | FARGATE | FARGATE_SPOT |
+| --- | --- | --- |
+| 성격 | on-demand 용량 | AWS 유휴 용량 |
+| 가격 | 정가 | 보통 크게 할인 |
+| 중단 | AWS가 임의 회수하지 않음 | 회수 시 2분 경고 후 종료 |
+| 적합한 곳 | 기준 용량, 중단되면 안 되는 워크로드 | dev, 배치성 작업, 초과 용량 |
+
+cluster에 provider를 등록하는 것은 메뉴판을 만드는 일입니다. 실제로 어떤 provider를 몇 개 쓸지는 service의 `capacity_provider_strategy`가 결정합니다.
+
+```text
+base
+  - 이 개수까지는 무조건 해당 provider에 배치
+
+weight
+  - base를 넘는 태스크를 provider 사이에 어떤 비율로 나눌지 결정
+```
+
+예를 들어 stag에서 FARGATE에 `base = 1`, FARGATE_SPOT에 `weight = 1`을 주면 첫 번째 태스크는 on-demand에 고정되고, 그 이후 늘어나는 태스크는 spot으로 갈 수 있습니다.
+
+## 환경별 전략
+
+dev와 stag는 같은 전략을 쓰지 않았습니다. 두 환경의 목적이 다르기 때문입니다.
+
+| 환경 | capacity provider 전략 | 오토스케일링 | 의도 |
+| --- | --- | --- | --- |
+| dev | FARGATE_SPOT 100% | min 1 / max 3 | 비용 우선, 중단 허용 |
+| stag | FARGATE base 1 + 초과분 SPOT | min 2 / max 4 | 기준 안정성 + 멀티 인스턴스 검증 |
+
+dev는 전량 spot으로 두었습니다. dev는 중단을 허용할 수 있고, 비용 절감 효과가 바로 나타나는 환경입니다. 기존에는 dev도 on-demand 태스크 1개를 항상 유지하고 있었으니, spot 전환만으로도 기본 비용을 낮출 수 있었습니다.
+
+stag는 조금 다르게 봤습니다. stag는 prod 직전 검증 환경입니다. 여기서는 비용보다 "prod에서 처음 만나면 안 되는 문제를 먼저 만나는 것"이 중요합니다. 그래서 최소 태스크 수를 2로 올렸습니다.
+
+이 선택에는 비용이 듭니다. 하지만 정산 서비스에는 스케줄러, 분산 락, DB lock, idempotency, 캐시 갱신처럼 단일 인스턴스에서는 잘 보이지 않는 문제가 있습니다. stag가 항상 1대만 돌면 멀티 인스턴스에서만 터지는 버그는 prod에 가서야 보입니다. stag min 2는 단순한 고가용성 설정이 아니라 멀티 인스턴스 운영 리허설입니다.
+
+## 메모리 타깃 트래킹을 빼기로 한 이유
+
+모듈에는 CPU target tracking과 memory target tracking을 둘 다 붙일 수 있었습니다. 기존 tfvars에는 `memory_target = 75`에 가까운 설정이 남아 있었습니다. 하지만 JVM 애플리케이션에서 memory utilization을 autoscaling 기준으로 쓰는 것은 조심해야 합니다.
+
+JVM은 한 번 확보한 heap을 OS에 곧바로 돌려주지 않습니다. 실제 요청 부하가 낮아져도 컨테이너 메모리 사용률은 높게 보일 수 있습니다. 그러면 memory target tracking은 이렇게 오작동할 수 있습니다.
+
+```text
+1. 앱이 정상적으로 heap을 확보한다
+2. CloudWatch에는 memory utilization이 높게 보인다
+3. autoscaling이 max까지 scale out한다
+4. 부하가 줄어도 memory utilization은 기대만큼 내려오지 않는다
+5. scale in이 잘 일어나지 않는다
+```
+
+정산 서비스의 초기 목표는 요청 부하에 대한 탄력성이지 JVM heap 확보량에 대한 반응이 아니었습니다. 그래서 memory target tracking은 빼고 CPU 60% 단일 기준으로 정리했습니다.
+
+CPU 기준도 완벽한 답은 아닙니다. IO wait, DB 병목, thread pool 포화처럼 CPU로 드러나지 않는 병목도 있습니다. 하지만 첫 단계에서는 예측 가능한 단일 신호가 더 안전했습니다. 나중에 p95 latency나 SQS backlog처럼 도메인에 맞는 지표가 생기면 그때 확장하는 편이 낫다고 봤습니다.
+
+## stopTimeout 120초
+
+capacity provider 작업을 하면서 task definition도 같이 손봤습니다. 핵심은 container `stopTimeout`입니다.
+
+Fargate Spot은 회수될 때 태스크에 종료 신호를 주고 약 2분 뒤 종료됩니다. 컨테이너 정의에 `stopTimeout`을 지정하지 않으면 기본값은 30초입니다. Spring Boot 앱이 SIGTERM을 받고 graceful shutdown을 수행하려면 30초는 짧을 수 있습니다.
+
+그래서 stopTimeout을 Fargate에서 허용되는 최대치인 120초로 늘렸습니다.
+
+```text
+SIGTERM
+  -> 앱이 신규 요청 수락 중단
+  -> 처리 중인 요청 마무리
+  -> scheduler / async executor 종료
+  -> DB connection 정리
+  -> 컨테이너 종료
+```
+
+이 변경은 평소에는 서비스에 바로 반영되지 않을 수 있었습니다. 배포 스크립트가 "현재 running task definition을 복제해서 새 이미지만 갈아끼우는" 방식이었기 때문입니다. Terraform에만 task definition 변경을 해두면 다음 배포에서 러닝 TD를 복제하는 순간 변경이 사라질 수 있습니다.
+
+이번 capacity provider 전환은 어차피 ECS service 재생성이 필요한 작업이었습니다. 그래서 stopTimeout도 같은 배포 창에 태웠습니다. 서비스 재생성이 발생하는 김에 task definition의 운영 기본값도 같이 바로잡은 셈입니다.
+
+## Terraform에서 만난 첫 번째 함정: launch_type과 strategy
+
+ECS service에서 `launch_type`과 `capacity_provider_strategy`는 같이 쓰는 값이 아닙니다. 기존처럼 `launch_type = "FARGATE"`를 둔 채 strategy를 추가하면 모델이 충돌합니다.
+
+서비스는 다음 방향으로 바뀌어야 합니다.
+
+```text
+before
+  launch_type = FARGATE
+
+after
+  capacity_provider_strategy {
+    capacity_provider = FARGATE or FARGATE_SPOT
+    base              = ...
+    weight            = ...
+  }
+```
+
+이 변경은 단순한 속성 추가처럼 보이지만 실제로는 service의 배치 방식 자체를 바꾸는 작업입니다. AWS provider 문서 기준으로 capacity provider strategy를 0개에서 N개로 처음 추가하는 변경은 in-place 업데이트가 아니라 service replacement가 될 수 있습니다.
+
+따라서 dev와 stag 모두 몇 분의 다운타임 가능성을 인정하고 진행했습니다. 특히 stag는 사용자 영향이 없더라도 운영에 가까운 환경이기 때문에 더 조심해야 했습니다.
+
+## Terraform에서 만난 두 번째 함정: 조건부 리소스 스왑
+
+모듈에는 ECS service 리소스가 두 개 있었습니다.
+
+```hcl
+resource "aws_ecs_service" "standard" {
+  count = var.autoscaling_enabled ? 0 : 1
+}
+
+resource "aws_ecs_service" "autoscaled" {
+  count = var.autoscaling_enabled ? 1 : 0
+}
+```
+
+이 구조는 `ignore_changes`를 정적으로 유지하기 위해 만들어진 것으로 보입니다. Terraform은 lifecycle block을 동적으로 구성하기 어렵기 때문에, autoscaling이 꺼진 service와 켜진 service를 리소스 주소 자체로 나눈 것입니다.
+
+문제는 `autoscaling_enabled`를 켜는 순간입니다.
+
+```text
+aws_ecs_service.standard[0] destroy
+aws_ecs_service.autoscaled[0] create
+```
+
+이 둘은 Terraform 입장에서는 서로 다른 리소스입니다. 같은 ECS service name을 쓰고 있어도 destroy와 create의 순서가 항상 원하는 대로 보장된다고 기대하면 안 됩니다. create가 먼저 달리면 같은 이름의 service가 이미 있다는 오류가 날 수 있습니다.
+
+해법은 `moved` block이었습니다.
+
+```hcl
+moved {
+  from = aws_ecs_service.standard[0]
+  to   = aws_ecs_service.autoscaled[0]
+}
+```
+
+이렇게 하면 Terraform state 관점에서 리소스 주소를 먼저 옮깁니다. "서로 다른 리소스의 destroy/create"가 아니라 "같은 리소스의 변경 또는 replacement"로 다룰 수 있게 됩니다.
+
+단, moved block에도 수명이 있습니다. 아직 `standard[0]`가 config에 존재하는 환경에서 moved block을 넣으면 Terraform이 모순을 감지할 수 있습니다. 그래서 전 환경 전환이 끝난 뒤 moved block을 제거하는 후속 정리까지 작업 범위에 넣어야 합니다.
+
+## 재생성 전에 반드시 확인한 것: 이미지 digest
+
+ECS service가 재생성되면 새 service는 Terraform에 기록된 task definition 기준으로 뜹니다. 이때 Terraform이 알고 있는 `container_image`가 실제 러닝 이미지와 다르면 서비스 재생성은 의도치 않은 롤백이 될 수 있습니다.
+
+그래서 apply 전에 환경별로 확인했습니다.
+
+```text
+Terraform tfvars의 container_image digest
+현재 ECS service가 실행 중인 task definition image digest
+```
+
+dev는 일치했습니다. stag는 어긋나 있었습니다. Terraform tfvars에는 예전 digest가 남아 있었고, 실제 running task는 더 새 digest를 쓰고 있었습니다. 다른 머신에서 배포하면서 tfvars 갱신이 누락된 드리프트로 보였습니다.
+
+이 상태로 apply했다면 capacity provider 전환과 동시에 stag 앱이 과거 이미지로 되돌아갔을 수 있습니다. 러닝 digest로 tfvars를 맞춘 뒤 진행했습니다.
+
+이 확인은 이후 작업의 중요한 힌트가 됐습니다. 배포된 이미지의 원본을 로컬 tfvars에 맡기는 구조는 CI/CD와 맞지 않고, 여러 사람이 배포하는 순간 쉽게 깨집니다. 이 문제는 나중에 SSM Parameter Store를 배포 이미지의 원본으로 삼는 방식으로 해결했습니다.
+
+## 결과
+
+dev 적용은 정상적으로 끝났습니다.
+
+```text
+ECS cluster capacity providers 등록
+ECS service capacity_provider_strategy 적용
+FARGATE_SPOT 배치 확인
+Application Auto Scaling target 생성
+CPU target tracking policy 생성
+/health 200 확인
+```
+
+여기까지만 보면 깔끔한 인프라 개선이었습니다. 하지만 stag 적용 중에는 ECR 라이프사이클 정책 때문에 이미지 pull 실패가 발생했고, 서비스가 태스크를 하나도 띄우지 못하는 장애로 이어졌습니다.
+
+이 장애는 capacity provider 자체의 버그가 아니었습니다. 오히려 capacity provider와 autoscaling이 그동안 숨어 있던 위험을 드러낸 사건에 가까웠습니다. 태스크 교체가 드문 시스템에서는 삭제된 이미지가 오래 숨어 있을 수 있습니다. 하지만 spot, scale out, service replacement가 들어오면 새 태스크는 언제든 이미지를 다시 pull합니다.
+
+결론은 단순했습니다.
+
+```text
+오토스케일링을 켠다는 것은 태스크 교체를 일상으로 받아들이는 일이다.
+태스크 교체가 일상이 되면 이미지 보존과 배포 추적성은 가용성 요구사항이 된다.
+```
+
+이 깨달음이 이후 ECR 하드닝, 알람, Slack 연동, access log, GitHub Actions OIDC 배포 파이프라인으로 이어졌습니다.

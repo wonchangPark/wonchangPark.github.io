@@ -1,0 +1,403 @@
+---
+title: "GitHub Actions OIDC로 ECS 배포 파이프라인을 만든 기록"
+description: "로컬 수동 배포를 GitHub Actions, AWS OIDC, ECR build-push, 수동 deploy dispatch, SSM deployed-image 기록, dev에서 stag 승격 규약으로 바꾼 기록입니다."
+pubDate: 2026-07-08
+category: "CI/CD / Infra"
+tags: ["GitHub Actions", "OIDC", "ECS", "SSM"]
+techStacks: ["AWS / Infra", "Java / Spring"]
+featured: false
+priority: 12
+proof: "OIDC 기반 ECS 배포"
+---
+
+ECR 장애를 복구하면서 가장 불편했던 점은 이미지가 삭제된 것보다도 배포 기록이 흩어져 있었다는 사실이었습니다. 어느 커밋이 stag에 배포됐는지 task definition만으로는 알 수 없었고, 로컬 shell history에도 해당 배포 기록이 없었습니다.
+
+그래서 배포 경로를 GitHub Actions로 옮겼습니다. 목표는 단순히 "자동화"가 아니었습니다. 장기 AWS access key를 없애고, 배포 기록을 GitHub와 AWS 리소스에 남기고, Terraform과 배포 스크립트 사이의 이미지 원본을 하나로 정하는 것이었습니다.
+
+## 시리즈
+
+- [ECS Fargate에 capacity provider와 오토스케일링을 붙인 기록](/posts/ecs-capacity-provider-autoscaling/)
+- [ECR 라이프사이클 정책 때문에 stag ECS가 내려간 장애 복구기](/posts/ecs-ecr-lifecycle-outage-recovery/)
+- [CloudWatch 알람과 AWS Chatbot으로 ECS 장애를 Slack에 연결하기](/posts/ecs-cloudwatch-slack-chatbot-monitoring/)
+- [ECR을 Terraform에 편입하고 배포 추적성을 복구한 기록](/posts/ecr-terraform-traceable-deployments/)
+- [ALB access log로 장애 시간대 요청을 남기는 구조](/posts/alb-access-log-for-settlement/)
+- [GitHub Actions OIDC로 ECS 배포 파이프라인을 만든 기록](/posts/github-actions-oidc-ecs-deployment-pipeline/)
+
+## 기존 배포 방식의 한계
+
+기존 배포는 로컬 머신에서 두 단계로 진행했습니다.
+
+```text
+settlement-backend repo
+  deploy-to-ecr.sh
+    -> docker build
+    -> ECR push
+    -> git SHA tag
+
+settlement-terraform repo
+  deploy_image.sh
+    -> image digest 선택
+    -> Flyway one-off migration task
+    -> ECS task definition 등록
+    -> ECS service update
+```
+
+이 방식은 빠르게 시작하기 좋습니다. 하지만 운영 경로로 오래 쓰기에는 약점이 분명했습니다.
+
+```text
+배포 실행 기록이 개인 머신 shell history에 남는다
+배포 스크립트 버전이 사람마다 달라질 수 있다
+tfvars 이미지 값이 실제 배포 이미지와 드리프트날 수 있다
+AWS long-lived key를 로컬에 두기 쉽다
+누가 어떤 입력으로 배포했는지 GitHub에 남지 않는다
+```
+
+이번 장애에서 이 약점들이 실제로 드러났습니다. 6월 27일 stag 배포는 현재 로컬 머신 history에 없었고, Terraform tfvars는 실제 running image보다 예전 digest를 가리키고 있었습니다.
+
+## 설계: build와 deploy를 분리
+
+파이프라인은 두 repository에 나누어 만들었습니다.
+
+```text
+settlement-backend
+  main push
+    -> GitHub Actions build-push
+    -> Docker build
+    -> ECR push
+    -> main 최신 이미지 SSM 기록
+
+settlement-terraform
+  workflow_dispatch
+    -> env 선택
+    -> image_ref 선택 입력
+    -> image digest 해석
+    -> migration
+    -> ECS rolling deploy
+    -> deployed-image SSM 기록
+```
+
+build는 backend repo가 담당합니다. 소스 코드와 Dockerfile을 소유하는 곳이 backend repo이기 때문입니다.
+
+deploy는 terraform repo가 담당합니다. ECS service, task definition, migration task 실행, IAM, SSM path를 소유하는 곳이 terraform repo이기 때문입니다.
+
+배포는 dev와 stag 모두 수동 dispatch로 두었습니다. main push가 곧바로 ECS에 배포되지는 않습니다. 자동화의 목표는 "마구 배포"가 아니라 "반복 절차와 기록을 안정화"하는 것이었습니다.
+
+## OIDC: 장기 키 없는 인증
+
+GitHub Actions에서 AWS를 쓰는 오래된 방식은 repository secret에 access key를 넣는 것입니다.
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+```
+
+이 방식은 간단하지만 장기 키를 보관해야 합니다. 키가 유출되면 회전해야 하고, 어떤 workflow가 어떤 권한을 가져야 하는지 분리하기도 어렵습니다.
+
+OIDC 방식은 다릅니다.
+
+```text
+1. GitHub Actions job이 실행된다
+2. GitHub가 job context를 담은 단명 OIDC token을 발급한다
+3. AWS IAM role trust policy가 token의 issuer, audience, subject를 검증한다
+4. 조건이 맞으면 STS가 임시 credential을 발급한다
+5. job은 그 임시 credential로 AWS API를 호출한다
+```
+
+핵심은 trust policy와 permission policy를 나누는 것입니다.
+
+```text
+trust policy
+  - 누가 이 role을 assume할 수 있는가
+  - GitHub repo, branch, environment 조건
+
+permission policy
+  - assume한 뒤 무엇을 할 수 있는가
+  - ECR push, ECS update-service, SSM put-parameter 등
+```
+
+역할은 세 개로 나눴습니다.
+
+| Role | 신뢰 대상 | 권한 |
+| --- | --- | --- |
+| `settlement-gha-ecr-push` | backend repo | ECR push, latest-main 기록 |
+| `settlement-gha-deploy-dev` | terraform repo dev environment | dev ECS/SSM/Secrets/Migration 권한 |
+| `settlement-gha-deploy-stag` | terraform repo stag environment | stag ECS/SSM/Secrets/Migration 권한 |
+
+dev role은 dev 리소스만 만질 수 있고, stag role은 stag 리소스만 만질 수 있게 분리했습니다. `iam:PassRole`도 필요한 task execution role과 task role로 제한했습니다.
+
+## GitHub Environment와 OIDC subject
+
+deploy workflow에는 GitHub Environment를 걸었습니다.
+
+```text
+environment: dev
+environment: stag
+```
+
+GitHub Environment를 쓰면 OIDC token의 subject가 environment를 포함합니다.
+
+```text
+repo:<org>/<repo>:environment:dev
+repo:<org>/<repo>:environment:stag
+```
+
+이 값을 IAM trust policy에서 검증하면 dev workflow가 stag role을 assume하는 일을 막을 수 있습니다. 또한 GitHub Environment에는 required reviewer 같은 보호 규칙도 붙일 수 있습니다. 나중에 stag 배포를 승인 기반으로 바꾸기 쉽습니다.
+
+한 가지 주의할 점도 있었습니다. AWS 계정에는 이미 GitHub OIDC provider가 존재했습니다. 다른 프로젝트가 쓰는 공유 리소스였습니다. 이런 리소스를 새 Terraform stack이 소유하려고 하면 충돌하거나 의도치 않은 변경을 만들 수 있습니다.
+
+그래서 OIDC provider는 생성하지 않고 data source로 참조했습니다. 남이 쓰는 공유 리소스는 함부로 소유하지 않는 것이 안전합니다.
+
+## 핵심 설계: 배포의 최종 작성자는 누구인가
+
+이 파이프라인에서 가장 중요한 질문은 이것이었습니다.
+
+```text
+ECS service가 어떤 이미지를 실행해야 하는지 최종으로 쓰는 주체는 Terraform인가, 배포 스크립트인가?
+```
+
+이 질문이 흐리면 위험합니다. 배포 스크립트가 새 이미지를 배포했는데, 나중에 Terraform apply가 예전 task definition image로 서비스를 되돌릴 수 있습니다.
+
+결론은 "배포 스크립트가 최종 작성자"였습니다. Terraform은 서비스 구조와 기본 task definition을 관리하지만, 실행 중인 service의 task definition 변경은 배포 파이프라인이 담당합니다.
+
+이를 강제하기 위해 세 가지 장치를 넣었습니다.
+
+## 장치 1: ECS service의 task_definition ignore_changes
+
+Terraform ECS service에는 task definition 변경을 무시하도록 했습니다.
+
+```hcl
+lifecycle {
+  ignore_changes = [task_definition]
+}
+```
+
+이렇게 하면 Terraform apply가 이미 배포된 service task definition을 이전 값으로 되돌리지 않습니다.
+
+물론 이 설정은 양날의 검입니다. Terraform이 task definition drift를 자동으로 고쳐주지 않기 때문입니다. 그래서 배포된 이미지의 원본을 다른 곳에 명확히 남겨야 합니다. 그 역할을 SSM Parameter Store가 맡습니다.
+
+## 장치 2: SSM deployed-image를 이미지 원본으로 사용
+
+배포 성공 시 deploy script는 최종 배포된 digest를 SSM Parameter Store에 기록합니다.
+
+```text
+/settlement/dev/app/deployed-image
+/settlement/stag/app/deployed-image
+```
+
+Terraform은 이 값을 읽어서 task definition의 기본 image로 사용합니다.
+
+```hcl
+data "aws_ssm_parameter" "deployed_image" {
+  count = var.deployed_image_ssm_parameter_name != null ? 1 : 0
+  name  = var.deployed_image_ssm_parameter_name
+}
+
+locals {
+  effective_container_image = var.deployed_image_ssm_parameter_name != null ?
+    nonsensitive(data.aws_ssm_parameter.deployed_image[0].value) :
+    var.container_image
+}
+```
+
+이 구조에서는 Terraform apply가 service를 재생성해야 하는 상황이 와도, 예전 tfvars 값이 아니라 마지막으로 성공 배포된 이미지를 기준으로 task definition을 만들 수 있습니다.
+
+즉, 과거의 "tfvars drift" 문제가 구조적으로 줄어듭니다.
+
+## 장치 3: SSM 기록 실패를 성공으로 보지 않기
+
+배포가 성공했는데 SSM 기록만 실패하면 애매한 상태가 됩니다.
+
+```text
+ECS service
+  -> 새 이미지 실행 중
+
+SSM deployed-image
+  -> 예전 이미지
+
+다음 Terraform apply
+  -> 예전 이미지로 재생성 가능
+```
+
+그래서 SSM 기록은 best effort가 아니라 배포의 일부로 봤습니다. 기록 실패 시 3회 재시도하고, 그래도 실패하면 workflow를 실패로 종료합니다. 이때 메시지에는 "수동으로 SSM을 기록하기 전 Terraform apply 금지"에 가까운 안내를 남기도록 했습니다.
+
+운영에서는 성공과 실패 사이의 회색 상태가 가장 위험합니다. 그래서 기록 실패를 조용히 묻지 않는 쪽을 선택했습니다.
+
+## image_ref 기본 규약
+
+배포 workflow는 `image_ref`를 입력받습니다. 하지만 매번 SHA나 digest를 복사해서 넣는 것은 귀찮고, 귀찮으면 실수합니다.
+
+그래서 빈 값의 의미를 환경별로 정했습니다.
+
+```text
+image_ref 비움
+  dev
+    -> /settlement/build/latest-main-image
+    -> 마지막 main push에서 성공적으로 빌드된 이미지
+
+  stag
+    -> /settlement/dev/app/deployed-image
+    -> dev에 실제 배포된 이미지 승격
+
+image_ref 입력
+  -> 입력값 우선
+  -> hotfix, rollback, 특정 digest 검증에 사용
+```
+
+여기서 중요한 것은 "최신"의 기준입니다. ECR의 push time을 기준으로 최신 이미지를 고르면 위험합니다. 이번 장애 복구처럼 과거 commit을 재빌드하면 그 이미지가 가장 최근 push가 됩니다.
+
+그래서 build-push workflow는 main push 이벤트에서 성공한 이미지일 때만 `/settlement/build/latest-main-image`를 갱신합니다. 이것은 "가장 최근에 push된 이미지"가 아니라 "가장 최근 main에 머지되어 빌드된 이미지"입니다.
+
+stag는 더 보수적으로 잡았습니다. stag의 기본값은 latest main이 아니라 dev deployed image입니다. 즉, dev에 실제로 배포된 이미지를 승격합니다.
+
+```text
+main build 성공
+  -> latest-main-image 갱신
+
+dev deploy 성공
+  -> dev deployed-image 갱신
+
+stag deploy 기본값
+  -> dev deployed-image 사용
+```
+
+이 흐름은 "dev에서 검증된 것만 stag로 간다"는 규약을 코드로 만든 것입니다.
+
+## 배포 흐름
+
+deploy workflow는 대략 다음 순서로 동작합니다.
+
+```text
+1. GitHub Environment에 맞는 AWS role assume
+2. image_ref 해석
+3. ECR digest 존재 확인
+4. git SHA 태그 역해석
+5. ECS one-off migration task 실행
+6. migration 성공 확인
+7. 새 task definition 등록
+8. ECS update-service
+9. deployment 안정화 대기
+10. /settlement/{env}/app/deployed-image 기록
+```
+
+마이그레이션은 앱 service rollout 전에 실행합니다. 실패하면 배포는 중단됩니다.
+
+롤링 배포는 ECS 설정에 기대고 있습니다.
+
+```text
+minimum_healthy_percent = 100
+maximum_percent         = 200
+deployment circuit breaker enabled
+```
+
+새 태스크가 healthy가 되기 전에는 기존 태스크를 내리지 않고, 실패하면 circuit breaker가 배포 실패를 감지합니다.
+
+## 무중단 실측
+
+파이프라인을 만든 뒤 dev에 실제 배포해 확인했습니다. 단순히 "ECS rolling deploy니까 무중단일 것"이라고 말하지 않고, 배포 중 `/health`를 5초 간격으로 폴링했습니다.
+
+결과는 다음과 같았습니다.
+
+```text
+총 76회 요청
+HTTP 200: 76회
+비정상 응답: 0회
+```
+
+이 결과가 가능한 이유는 배포 설정 때문입니다.
+
+```text
+기존 task 유지
+새 task 추가 기동
+새 task healthy 확인
+traffic 전환
+구 task 종료
+```
+
+물론 이것이 모든 배포가 항상 안전하다는 뜻은 아닙니다. 특히 DB migration은 자동 rollback되지 않습니다.
+
+## 남는 리스크: migration은 rollback되지 않는다
+
+ECS deployment circuit breaker는 앱 배포 실패를 감지하고 이전 task definition으로 되돌릴 수 있습니다. 하지만 이미 실행된 DB migration은 자동으로 되돌아가지 않습니다.
+
+위험한 시나리오는 이렇습니다.
+
+```text
+1. migration 성공
+2. 새 app task 실패
+3. ECS가 구버전 app으로 rollback
+4. 구버전 app이 새 schema 위에서 실행
+```
+
+그래서 무중단 배포의 전제는 backward-compatible migration입니다.
+
+```text
+expand
+  - 새 column/table 추가
+  - 구버전과 신버전 모두 동작 가능
+
+deploy
+  - 새 코드 배포
+
+contract
+  - 더 이상 쓰지 않는 column/table 제거
+  - 충분한 검증 이후 별도 배포
+```
+
+파이프라인이 아무리 좋아도 migration 설계가 깨지면 무중단은 깨집니다. CI/CD는 개발 규율을 대체하지 않습니다. 오히려 규율이 지켜졌을 때 안전하게 반복해주는 도구입니다.
+
+## 러너에서 만난 이슈들
+
+GitHub Actions로 옮기면서 몇 가지 마찰도 있었습니다.
+
+첫째, Node.js 20 deprecation 경고가 있었습니다. 사용 중인 action들의 major version을 올렸습니다.
+
+```text
+actions/checkout@v7
+aws-actions/configure-aws-credentials@v6
+docker/build-push-action@v7
+docker/setup-buildx-action@v4
+```
+
+둘째, artifact storage quota 문제가 있었습니다. buildx의 GitHub Actions cache가 약 812MB를 사용하고 있었고, GitHub Free plan의 storage quota는 500MB였습니다. 2025년부터 Actions cache가 이 quota를 공유하면서 cache 하나가 organization 전체 artifact upload를 막을 수 있는 상태였습니다.
+
+해결은 단순하게 했습니다.
+
+```text
+기존 GHA cache 삭제
+workflow에서 cache-to: type=gha 제거
+필요해지면 ECR registry cache 검토
+```
+
+풀빌드가 약 10분 걸리는 것은 감수했습니다. 지금은 배포 신뢰성이 캐시 최적화보다 중요했습니다.
+
+셋째, GitHub App token 형식 변경 공지가 있었습니다. 토큰 길이나 prefix를 하드코딩한 코드가 있으면 문제가 될 수 있는 변경이었습니다. 하지만 이 파이프라인은 AWS 인증에 OIDC를 쓰고, `GITHUB_TOKEN`을 직접 파싱하지 않기 때문에 영향이 없었습니다.
+
+## Before와 After
+
+정리하면 배포 구조는 이렇게 바뀌었습니다.
+
+| Before | After |
+| --- | --- |
+| 로컬 머신에서 수동 build/push | backend repo main push 시 build-push |
+| 로컬 머신에서 수동 deploy | terraform repo workflow_dispatch deploy |
+| AWS 장기 키 사용 가능성 | GitHub OIDC 임시 credential |
+| tfvars가 이미지 원본 | SSM deployed-image가 이미지 원본 |
+| 배포 기록이 shell history에 의존 | GitHub workflow run과 ECS/SSM에 기록 |
+| dev/stag 역할 경계 약함 | 환경별 IAM role 분리 |
+| 매번 image 입력 필요 | dev latest-main, stag dev 승격 기본값 |
+| 배포 성공 후 추적성 약함 | task definition git-sha, APP_GIT_SHA |
+
+CI/CD를 만든다는 것은 버튼 하나를 만드는 일이 아닙니다. 누가 무엇을 배포할 수 있는지, 배포된 이미지의 원본이 어디인지, 실패했을 때 어디까지 진행됐는지, 다음 Terraform apply가 무엇을 기준으로 움직이는지를 정하는 일입니다.
+
+이번 파이프라인의 핵심은 자동 배포가 아니라 상태의 원본을 정리한 것입니다.
+
+```text
+소스의 원본: git commit
+이미지의 원본: ECR digest
+최신 main build의 원본: SSM latest-main-image
+환경별 배포 이미지의 원본: SSM deployed-image
+배포 실행 기록의 원본: GitHub Actions run
+ECS 실행 버전의 원본: task definition tag와 APP_GIT_SHA
+```
+
+이렇게 원본을 나누고 연결해두면 다음 장애 때는 포렌식이 아니라 조회부터 시작할 수 있습니다.
