@@ -102,11 +102,11 @@ event_image.event_template_id
 
 백엔드 입장에서도 event 중심 구조는 단기적으로 장점이 있었습니다.
 
-- 조회할 때 조인이 줄어든다.
-- 운영자가 보는 단위와 event row가 일치한다.
-- 검수 workflow를 실제 event 단위로 연결하기 쉽다.
-- 이미지, 옵션, 전문가 연결의 소유자가 단순해진다.
-- migration 이후에는 event 하나만 봐도 서비스 노출 정보를 알 수 있다.
+- 조회할 때 조인이 줄어듭니다.
+- 운영자가 보는 단위와 event row가 일치합니다.
+- 검수 workflow를 실제 event 단위로 연결하기 쉽습니다.
+- 이미지, 옵션, 전문가 연결의 소유자가 단순해집니다.
+- migration 이후에는 event 하나만 봐도 서비스 노출 정보를 알 수 있습니다.
 
 하지만 이 선택은 복잡도를 없앤 것이 아니라 다른 곳으로 옮긴 것에 가까웠습니다. 데이터 모델에서는 단순해졌지만, 같은 상품이 조건별로 복제될 수 있고, 사용자가 여러 조건을 동시에 만족할 때 중복 노출을 막기 위한 별도 규칙이 필요해졌습니다.
 
@@ -203,14 +203,14 @@ Vendor request
 
 이미 event 중심으로 합쳐진 상태에서 다시 템플릿 중심으로 되돌린다면 한 번에 테이블을 갈아엎기보다 단계적으로 옮기는 편이 안전합니다.
 
-1. 기존 event에 `template_id`를 다시 추가하고 nullable 상태로 둔다.
-2. 이름, 설명, 기본 가격, 소요 시간은 event에 유지하고, 같은 상품을 묶을 수 있는 최소 기준만 template으로 backfill한다.
-3. 제휴사, 직급, 임직원 여부, 할인값은 `EventPolicy`로 분리한다.
-4. 이미지와 옵션은 template scope와 operation scope로 분류해 FK를 이동한다.
-5. 기존 event 목록 조회와 새 template 기반 조회를 동시에 운영하며 결과를 비교한다.
-6. 사용자 목록 화면을 template 기반 `EventCard` projection으로 전환한다.
-7. 예약, 리뷰, 통계가 template 기준으로 묶여야 하는지 operation 기준으로 묶여야 하는지 명확히 나눈다.
-8. 검증이 끝난 뒤 event에 중복 저장된 상품 컬럼을 제거하거나 read model 용도로만 남긴다.
+1. 기존 event에 `template_id`를 다시 추가하고 nullable 상태로 둡니다.
+2. 이름, 설명, 기본 가격, 소요 시간은 event에 유지하고, 같은 상품을 묶을 수 있는 최소 기준만 template으로 backfill합니다.
+3. 제휴사, 직급, 임직원 여부, 할인값은 `EventPolicy`로 분리합니다.
+4. 이미지와 옵션은 template scope와 operation scope로 분류해 FK를 이동합니다.
+5. 기존 event 목록 조회와 새 template 기반 조회를 동시에 운영하며 결과를 비교합니다.
+6. 사용자 목록 화면을 template 기반 `EventCard` projection으로 전환합니다.
+7. 예약, 리뷰, 통계가 template 기준으로 묶여야 하는지 operation 기준으로 묶여야 하는지 명확히 나눕니다.
+8. 검증이 끝난 뒤 event에 중복 저장된 상품 컬럼을 제거하거나 read model 용도로만 남깁니다.
 
 이 과정에서 rollback을 위해 기존 컬럼을 바로 삭제하지 않고, backfill 결과를 검증할 수 있는 기간을 두는 것이 중요합니다. 특히 이미지 FK나 가격 파생 데이터는 한 번 끊기면 복구가 어렵기 때문에, template ID와 event ID 매핑을 별도 테이블이나 migration 로그로 남기는 편이 안전합니다.
 

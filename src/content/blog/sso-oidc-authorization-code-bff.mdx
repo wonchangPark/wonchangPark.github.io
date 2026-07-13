@@ -44,7 +44,7 @@ OIDC에서는 보통 이런 값을 발급합니다.
 - `access_token`: API 접근 권한을 나타내는 token
 - `refresh_token`: access token을 갱신하기 위한 token
 
-## 중앙 플랫폼에서는 IdP가 하나 더 생긴다
+## 중앙 플랫폼에서는 IdP가 하나 더 생깁니다
 
 통합 플랫폼을 만든다면 Google이나 Apple 로그인을 직접 서비스마다 붙이는 방식은 점점 복잡해집니다.
 
@@ -103,14 +103,14 @@ linked identities:
 OIDC에서 가장 일반적인 로그인 흐름은 `Authorization Code Flow`입니다. 웹 서비스 기준으로 단순화하면 다음과 같습니다.
 
 ```text
-1. 사용자가 서비스 A에 접속한다.
-2. 서비스 A는 로그인되지 않은 사용자를 IdP 로그인 페이지로 redirect한다.
-3. 사용자는 IdP에서 로그인한다.
-4. IdP는 사용자의 브라우저를 서비스 A callback URL로 다시 redirect한다.
-   이때 authorization code를 붙인다.
-5. 서비스 A 서버는 code를 IdP의 token endpoint로 보낸다.
-6. IdP는 서비스 A 서버에 id_token, access_token 등을 발급한다.
-7. 서비스 A는 token을 검증하고 자기 서비스 세션을 만든다.
+1. 사용자가 서비스 A에 접속합니다.
+2. 서비스 A는 로그인되지 않은 사용자를 IdP 로그인 페이지로 redirect합니다.
+3. 사용자는 IdP에서 로그인합니다.
+4. IdP는 사용자의 브라우저를 서비스 A callback URL로 다시 redirect합니다.
+   이때 authorization code를 붙입니다.
+5. 서비스 A 서버는 code를 IdP의 token endpoint로 보냅니다.
+6. IdP는 서비스 A 서버에 id_token, access_token 등을 발급합니다.
+7. 서비스 A는 token을 검증하고 자기 서비스 세션을 만듭니다.
 ```
 
 여기서 중요한 점은 4번입니다. IdP가 서비스 A에게 직접 code를 주는 것처럼 표현하지만, 실제로는 브라우저를 서비스 A callback URL로 이동시키는 것입니다.
@@ -177,11 +177,11 @@ https://service-a.example.com/callback?code=abc123
 
 code가 탈취되더라도 바로 API 호출에 쓸 수 없습니다. 보통 다음 조건을 만족해야 token으로 교환할 수 있습니다.
 
-- 매우 짧은 시간 안에 사용해야 한다.
-- 한 번만 사용할 수 있다.
-- 등록된 `redirect_uri`와 맞아야 한다.
-- confidential client라면 `client_secret`이 필요하다.
-- public client라면 PKCE의 `code_verifier` 검증이 필요하다.
+- 매우 짧은 시간 안에 사용해야 합니다.
+- 한 번만 사용할 수 있습니다.
+- 등록된 `redirect_uri`와 맞아야 합니다.
+- confidential client라면 `client_secret`이 필요합니다.
+- public client라면 PKCE의 `code_verifier` 검증이 필요합니다.
 
 즉 브라우저를 지나는 값은 공격 가치가 낮은 code로 제한하고, 진짜 token은 서버 간 통신으로 받는 것입니다.
 
@@ -203,12 +203,12 @@ IdP -> 브라우저 -> 서비스 A callback
 흐름은 이렇습니다.
 
 ```text
-1. client가 랜덤 문자열 code_verifier를 만든다.
-2. code_verifier를 해시해서 code_challenge를 만든다.
-3. 로그인 요청에는 code_challenge만 보낸다.
-4. IdP는 authorization code와 code_challenge의 관계를 기억한다.
-5. token 교환 시 client가 code_verifier를 제출한다.
-6. IdP가 code_verifier를 해시해 기존 code_challenge와 비교한다.
+1. client가 랜덤 문자열 code_verifier를 만듭니다.
+2. code_verifier를 해시해서 code_challenge를 만듭니다.
+3. 로그인 요청에는 code_challenge만 보냅니다.
+4. IdP는 authorization code와 code_challenge의 관계를 기억합니다.
+5. token 교환 시 client가 code_verifier를 제출합니다.
+6. IdP가 code_verifier를 해시해 기존 code_challenge와 비교합니다.
 ```
 
 개념적으로는 다음과 같습니다.
@@ -258,11 +258,11 @@ OIDC에는 실제로 `form_post`라는 response mode가 있습니다. IdP가 브
 
 하지만 token이 여전히 브라우저를 통과한다는 사실은 변하지 않습니다.
 
-- token이 DOM의 hidden input에 들어올 수 있다.
-- 개발자 도구 Network 탭에서 request payload로 볼 수 있다.
-- 브라우저 확장 프로그램이 페이지나 요청에 접근할 수 있다.
-- XSS가 있으면 form 값을 읽을 수 있다.
-- 모바일 WebView나 debugging proxy 환경에서 노출면이 늘어난다.
+- token이 DOM의 hidden input에 들어올 수 있습니다.
+- 개발자 도구 Network 탭에서 request payload로 볼 수 있습니다.
+- 브라우저 확장 프로그램이 페이지나 요청에 접근할 수 있습니다.
+- XSS가 있으면 form 값을 읽을 수 있습니다.
+- 모바일 WebView나 debugging proxy 환경에서 노출면이 늘어납니다.
 
 TLS 관점에서만 보면 브라우저와 서버 사이의 통신은 암호화됩니다. 하지만 TLS는 종단 간 암호화입니다. 브라우저가 통신의 종단점이면 브라우저에서 평문이 됩니다.
 
@@ -270,10 +270,10 @@ TLS 관점에서만 보면 브라우저와 서버 사이의 통신은 암호화�
 
 ```text
 서버 간 token 교환:
-서비스 A 서버와 IdP 서버에서만 token을 본다.
+서비스 A 서버와 IdP 서버에서만 token을 봅니다.
 
 form_post token 전달:
-IdP 서버, 사용자 브라우저, 서비스 A 서버가 token 경로에 들어온다.
+IdP 서버, 사용자 브라우저, 서비스 A 서버가 token 경로에 들어옵니다.
 ```
 
 Authorization Code Flow는 이 브라우저 앞채널 구간에서 진짜 token을 제거하려는 설계입니다.
@@ -286,13 +286,13 @@ Authorization Code Flow는 이 브라우저 앞채널 구간에서 진짜 token�
 
 ```text
 1. 사용자가 서비스 B 접속
-2. 서비스 B에는 아직 session이 없다.
-3. 서비스 B가 IdP로 redirect한다.
-4. IdP는 브라우저의 IdP session cookie를 확인한다.
-5. 이미 로그인되어 있으므로 로그인 화면을 생략한다.
-6. IdP가 서비스 B callback으로 authorization code를 발급한다.
-7. 서비스 B가 code를 token으로 교환한다.
-8. 서비스 B가 자기 서비스 세션을 만든다.
+2. 서비스 B에는 아직 session이 없습니다.
+3. 서비스 B가 IdP로 redirect합니다.
+4. IdP는 브라우저의 IdP session cookie를 확인합니다.
+5. 이미 로그인되어 있으므로 로그인 화면을 생략합니다.
+6. IdP가 서비스 B callback으로 authorization code를 발급합니다.
+7. 서비스 B가 code를 token으로 교환합니다.
+8. 서비스 B가 자기 서비스 세션을 만듭니다.
 ```
 
 SSO는 서비스 A의 세션을 서비스 B가 직접 읽어서 되는 것이 아닙니다.
@@ -380,12 +380,12 @@ Authorization: Bearer eyJ...
 
 이 구조에서는 XSS가 치명적입니다. access token을 localStorage에 오래 저장하면 위험이 더 커집니다. 그래서 SPA에서는 다음 원칙이 중요합니다.
 
-- Authorization Code Flow + PKCE를 사용한다.
-- access token 만료 시간을 짧게 둔다.
-- 가능하면 localStorage 장기 저장을 피한다.
-- refresh token rotation을 적용한다.
-- CSP와 XSS 방어를 강하게 가져간다.
-- 보안 요구가 높다면 BFF를 고려한다.
+- Authorization Code Flow + PKCE를 사용합니다.
+- access token 만료 시간을 짧게 둡니다.
+- 가능하면 localStorage 장기 저장을 피합니다.
+- refresh token rotation을 적용합니다.
+- CSP와 XSS 방어를 강하게 가져갑니다.
+- 보안 요구가 높다면 BFF를 고려합니다.
 
 ## BFF 구조는 무엇인가
 
@@ -478,18 +478,18 @@ BFF의 장점은 브라우저가 access token과 refresh token을 몰라도 된�
 
 ```text
 accessToken:
-  - 로그인/refresh 응답 body로 내려준다.
-  - SPA가 메모리에 들고 있다.
-  - API 호출 때 Authorization header에 넣는다.
+  - 로그인/refresh 응답 body로 내려줍니다.
+  - SPA가 메모리에 들고 있습니다.
+  - API 호출 때 Authorization header에 넣습니다.
 
 refreshToken:
-  - HttpOnly / Secure / SameSite cookie로 내려준다.
-  - JS에서는 읽을 수 없다.
-  - refresh endpoint에서만 사용한다.
+  - HttpOnly / Secure / SameSite cookie로 내려줍니다.
+  - JS에서는 읽을 수 없습니다.
+  - refresh endpoint에서만 사용합니다.
 
 server session:
-  - Redis 같은 서버 저장소에 sessionId, userId, refreshToken을 저장한다.
-  - accessToken 안의 sid와 매 요청마다 비교한다.
+  - Redis 같은 서버 저장소에 sessionId, userId, refreshToken을 저장합니다.
+  - accessToken 안의 sid와 매 요청마다 비교합니다.
 ```
 
 이 구조에서는 access token이 탈취되면 만료 전까지 API 호출이 가능합니다. 일반 API 요청은 보통 refresh token을 같이 확인하지 않습니다.
@@ -524,13 +524,13 @@ refreshToken 보호:
 
 ```text
 하이브리드 SPA:
-  브라우저 JS가 accessToken을 안다.
-  XSS가 있으면 accessToken 문자열이 빠져나갈 수 있다.
+  브라우저 JS가 accessToken을 압니다.
+  XSS가 있으면 accessToken 문자열이 빠져나갈 수 있습니다.
 
 BFF + SPA:
-  브라우저 JS가 accessToken을 모른다.
-  accessToken은 BFF 서버 쪽에만 있다.
-  브라우저는 HttpOnly session cookie만 보낸다.
+  브라우저 JS가 accessToken을 모릅니다.
+  accessToken은 BFF 서버 쪽에만 있습니다.
+  브라우저는 HttpOnly session cookie만 보냅니다.
 ```
 
 둘 다 탈취되면 위험한 bearer credential을 사용한다는 점에서는 비슷합니다. 차이는 탈취 난이도와 탈취 후 재사용 범위입니다. HttpOnly session cookie는 JS가 값을 읽을 수 없기 때문에 XSS로 credential 자체를 빼내기가 어렵습니다. 물론 XSS가 있으면 사용자의 브라우저 안에서 요청을 보내는 공격은 여전히 가능합니다. 그래서 BFF에서도 CSP, CSRF, input sanitization, 권한 검증은 계속 중요합니다.
@@ -587,11 +587,11 @@ Internal Services
 
 MSA에서 access token이 유용한 이유는 명확합니다.
 
-- 쿠키는 브라우저와 도메인 중심 메커니즘이다.
-- 내부 서비스 간 호출은 browser cookie보다 Bearer token이 명확하다.
-- `aud`, `scope`, `role`, `tenant`, `sub` 같은 claim으로 권한 경계를 표현하기 좋다.
-- API Gateway에서 token 검증과 라우팅을 처리하기 쉽다.
-- 모바일, 웹, 외부 파트너 API까지 같은 인증 모델을 공유하기 좋다.
+- 쿠키는 브라우저와 도메인 중심 메커니즘입니다.
+- 내부 서비스 간 호출은 browser cookie보다 Bearer token이 명확합니다.
+- `aud`, `scope`, `role`, `tenant`, `sub` 같은 claim으로 권한 경계를 표현하기 좋습니다.
+- API Gateway에서 token 검증과 라우팅을 처리하기 쉽습니다.
+- 모바일, 웹, 외부 파트너 API까지 같은 인증 모델을 공유하기 좋습니다.
 
 그래서 고도화된 구조는 access token을 없애는 것이 아닙니다. **access token을 브라우저가 직접 들지 않게 하고, BFF/API Gateway/내부 서비스 경계에서 다루게 하는 것**에 가깝습니다.
 
@@ -627,7 +627,7 @@ mTLS-bound token은 token을 client certificate에 묶습니다. API 서버는 t
 
 ```text
 token:
-  이 access token은 certificate A를 가진 client만 사용할 수 있다.
+  이 access token은 certificate A를 가진 client만 사용할 수 있습니다.
 
 request:
   mTLS client certificate A로 연결
@@ -702,24 +702,24 @@ Level 5. High assurance
 
 SSO와 OIDC를 이해할 때 핵심은 “누가 어떤 token을 어디까지 들고 가는가”입니다.
 
-- IdP는 사용자의 신원을 인증해주는 주체다.
-- 중앙 통합 로그인 서버는 Google/Apple 같은 외부 IdP를 사용하면서, 서비스 A/B/C에게는 내부 IdP 역할을 한다.
-- authorization code는 token이 아니라 token을 받기 위한 일회용 교환권이다.
-- 브라우저 redirect 구간에는 진짜 token 대신 code만 전달하는 것이 안전하다.
-- token을 URL query에 싣는 것은 위험하고, form_post도 브라우저 앞채널을 통과한다는 한계가 있다.
-- 서비스 B에서 SSO가 되는 이유는 서비스 A 세션을 공유해서가 아니라, IdP 세션이 이미 있기 때문이다.
-- 순수 SPA는 access token을 브라우저가 가질 수밖에 없으므로 XSS와 token storage 전략이 중요하다.
-- refresh token을 HttpOnly cookie에 숨기고 server session과 묶는 하이브리드 구조는 순수 stateless JWT보다 통제력이 좋다.
-- BFF는 access token과 refresh token을 서버에 숨기고, 브라우저에는 HttpOnly session cookie만 주는 구조다.
-- MSA에서는 access token을 없애기보다, 브라우저가 아니라 BFF/API Gateway/내부 서비스 경계에서 다루게 하는 방향이 자연스럽다.
-- PKCE는 authorization code를 훔쳐 token으로 교환하는 공격을 막는다.
-- sender-constrained token은 token 문자열만 훔쳐서는 재사용할 수 없게 token을 특정 sender에 묶는다.
+- IdP는 사용자의 신원을 인증해주는 주체입니다.
+- 중앙 통합 로그인 서버는 Google/Apple 같은 외부 IdP를 사용하면서, 서비스 A/B/C에게는 내부 IdP 역할을 합니다.
+- authorization code는 token이 아니라 token을 받기 위한 일회용 교환권입니다.
+- 브라우저 redirect 구간에는 진짜 token 대신 code만 전달하는 것이 안전합니다.
+- token을 URL query에 싣는 것은 위험하고, form_post도 브라우저 앞채널을 통과한다는 한계가 있습니다.
+- 서비스 B에서 SSO가 되는 이유는 서비스 A 세션을 공유해서가 아니라, IdP 세션이 이미 있기 때문입니다.
+- 순수 SPA는 access token을 브라우저가 가질 수밖에 없으므로 XSS와 token storage 전략이 중요합니다.
+- refresh token을 HttpOnly cookie에 숨기고 server session과 묶는 하이브리드 구조는 순수 stateless JWT보다 통제력이 좋습니다.
+- BFF는 access token과 refresh token을 서버에 숨기고, 브라우저에는 HttpOnly session cookie만 주는 구조입니다.
+- MSA에서는 access token을 없애기보다, 브라우저가 아니라 BFF/API Gateway/내부 서비스 경계에서 다루게 하는 방향이 자연스럽습니다.
+- PKCE는 authorization code를 훔쳐 token으로 교환하는 공격을 막습니다.
+- sender-constrained token은 token 문자열만 훔쳐서는 재사용할 수 없게 token을 특정 sender에 묶습니다.
 
 결국 Authorization Code Flow와 BFF의 방향은 같습니다.
 
 ```text
 브라우저에 민감한 값을 덜 내려보내고,
-진짜 권한 credential은 가능한 서버 쪽에서 다룬다.
+진짜 권한 credential은 가능한 서버 쪽에서 다룹니다.
 ```
 
 이 원칙을 기준으로 보면 SSO 설계 논의에서 어떤 지점이 보안 경계이고, 어떤 선택이 단순함과 안전성 사이의 trade-off인지 훨씬 선명하게 볼 수 있습니다.
