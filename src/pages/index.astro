@@ -19,13 +19,13 @@ const posts = (await getRepresentativePosts()).slice(0, 3);
       <div class="section-head"><h2 id="projects-title">대표 프로젝트</h2><a class="section-link" href="/about/">전체 프로젝트 <Icon /></a></div>
       <div class="project-index">
         {projects.map((project, index) => (
-          <article class="project-row">
-            <span class="project-number">{String(index + 1).padStart(2, "0")}</span>
+          <a class="project-row" href={"/about/#" + project.id} aria-label={project.name + " 프로젝트 보기"}>
+            <span class="project-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
             <div class="project-row-main"><h3>{project.name}</h3>{project.id !== "walking-trip" && <p class="project-focus">{project.focus}</p>}<p class="project-description">{project.description}</p></div>
             <div class="project-actions">
-              <a href={"/about/#" + project.id} aria-label={project.name + " 프로젝트 보기"}>프로젝트 보기 <Icon /></a>
+              <span class="project-action">프로젝트 보기 <Icon /></span>
             </div>
-          </article>
+          </a>
         ))}
       </div>
     </section>
