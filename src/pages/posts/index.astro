@@ -1,291 +1,141 @@
 ---
 import BaseLayout from "@layouts/BaseLayout.astro";
+import PostCard from "@components/PostCard.astro";
+import Icon from "@components/Icon.astro";
 import { getRepresentativePosts } from "@lib/posts";
-
+import { topicIds, technologyTags, getTopic } from "@lib/taxonomy";
 const posts = await getRepresentativePosts();
-const techStackOrder = [
-  "Java / Spring",
-  "PostgreSQL / JPA",
-  "AWS / Infra",
-  "Security / Auth",
-  "Messaging / Async"
-];
-const techStackCounts = posts.reduce((counts, post) => {
-  post.data.techStacks.forEach((techStack) => {
-    const count = counts.get(techStack) ?? 0;
-    counts.set(techStack, count + 1);
-  });
-
-  return counts;
-}, new Map<string, number>());
-const orderedTechStacks = techStackOrder
-  .map((name) => ({ name, count: techStackCounts.get(name) ?? 0 }))
-  .filter((techStack) => techStack.count > 0);
-const extraTechStacks = Array.from(techStackCounts, ([name, count]) => ({ name, count }))
-  .filter((techStack) => !techStackOrder.includes(techStack.name))
-  .sort((a, b) => a.name.localeCompare(b.name));
-const techStacks = [...orderedTechStacks, ...extraTechStacks];
+const tagCounts = new Map<string, number>();
+const topicCounts = new Map<string, number>();
+posts.forEach((post) => {
+  post.data.tags.forEach((tag) => tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1));
+  topicCounts.set(post.data.category, (topicCounts.get(post.data.category) ?? 0) + 1);
+});
 ---
-
-<BaseLayout title="Posts - 박원창" description="백엔드 설계와 운영 안정성에 대한 글 목록">
-  <main>
-    <section class="site-shell section">
-      <p class="eyebrow">Posts</p>
-      <h1>기술 기록</h1>
-      <p class="lead">
-        실제 회사 코드를 공개하지 않고, 문제와 설계 판단을 일반화해 정리한 백엔드 엔지니어링 노트입니다.
-      </p>
+<BaseLayout title="기술 기록 | 박원창" description="도메인 설계와 운영 경험에 대한 백엔드 기술 기록">
+  <main id="main-content" tabindex="-1" class="site-shell">
+    <section class="page-intro">
+      <p class="eyebrow">Engineering Notes</p><h1>기술 기록</h1>
+      <p class="lead">도메인의 문제와 설계 판단, 운영 중 만난 실패를 기록합니다.</p>
     </section>
-    <section class="site-shell post-browser" data-post-browser>
-      <div class="post-stream">
-        <div class="post-list-head">
-          <div>
-            <p class="section-label">전체 글</p>
-            <h2>문제별 기술 기록</h2>
-          </div>
-          <div class="post-list-tools">
-            <p class="post-count" data-post-count>{posts.length}개 글</p>
-            <div class="sort-toggle" role="group" aria-label="글 정렬">
-              <button
-                class="sort-toggle-button is-active"
-                type="button"
-                data-sort-value="recommended"
-                aria-pressed="true"
-              >
-                추천순
-              </button>
-              <button
-                class="sort-toggle-button"
-                type="button"
-                data-sort-value="latest"
-                aria-pressed="false"
-              >
-                최신순
-              </button>
-            </div>
-          </div>
-        </div>
-        <div class="post-list" data-post-list>
-          {
-            posts.map((post) => (
-              <a
-                class="post-row article-link"
-                href={`/posts/${post.id}/`}
-                aria-label={`${post.data.title} 글 읽기`}
-                data-post-tech-stacks={post.data.techStacks.join("|")}
-                data-post-priority={post.data.priority}
-                data-post-date={post.data.pubDate.valueOf()}
-              >
-                <p class="article-meta post-row-meta">
-                  {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
-                  <span>{post.data.category} · {post.data.author}</span>
-                  <time datetime={post.data.pubDate.toISOString()}>
-                    {post.data.pubDate.toLocaleDateString("ko-KR", {
-                      year: "numeric",
-                      month: "short",
-                      day: "numeric"
-                    })}
-                  </time>
-                </p>
-                <div>
-                  <h2>{post.data.title}</h2>
-                  <p>{post.data.description}</p>
-                  <ul class="tag-list" aria-label="태그">
-                    {post.data.tags.map((tag) => <li><span class="tag">{tag}</span></li>)}
-                  </ul>
-                </div>
-              </a>
-            ))
-          }
+    <section class="post-browser" data-post-browser aria-label="글 탐색">
+      <div class="browser-tools">
+        <p class="post-count" data-post-count aria-live="polite" aria-atomic="true">{posts.length}개 글</p>
+        <div class="sort-toggle" role="group" aria-label="글 정렬">
+          <button class="sort-toggle-button is-active" type="button" data-sort-value="recommended" aria-pressed="true">추천순</button>
+          <button class="sort-toggle-button" type="button" data-sort-value="latest" aria-pressed="false">최신순</button>
         </div>
       </div>
-      <aside class="category-filter" aria-labelledby="category-filter-title">
-        <div class="category-filter-head">
-          <div>
-            <p class="section-label">Tech Stack</p>
-            <h2 id="category-filter-title">기술 스택</h2>
-          </div>
-          <button class="filter-reset is-idle" type="button" data-filter-reset>초기화</button>
+      <details class="filter-disclosure">
+        <summary><span data-filter-summary>주제와 기술로 좁혀 보기</span> <Icon name="caret-down" /></summary>
+        <div class="filter-group">
+          <h2 id="topic-filter-title">주제</h2>
+          <ul class="filter-option-list" aria-labelledby="topic-filter-title">
+            <li><button class="category-filter-option is-active" type="button" data-category-value="" aria-pressed="true"><span>전체 주제</span><span class="filter-count">{posts.length}</span></button></li>
+            {topicIds.filter((id) => topicCounts.has(id)).map((id) => <li><button class="category-filter-option" type="button" data-category-value={id} aria-pressed="false"><span>{getTopic(id)}</span><span class="filter-count">{topicCounts.get(id)}</span></button></li>)}
+          </ul>
         </div>
-        <ul class="category-filter-list" aria-label="기술 스택 필터">
-          {
-            techStacks.map((techStack) => (
-              <li>
-                <button
-                  class="category-filter-option"
-                  type="button"
-                  data-filter-value={techStack.name}
-                  aria-pressed="false"
-                >
-                  <span class="filter-box" aria-hidden="true"></span>
-                  <span>{techStack.name}</span>
-                  <span class="filter-count">{techStack.count}</span>
-                </button>
-              </li>
-            ))
-          }
-        </ul>
-      </aside>
+        <div class="filter-group">
+          <h2 id="tech-filter-title">기술</h2>
+          <p class="filter-help">여러 기술을 고르면 그중 하나 이상을 다룬 글을 보여줍니다.</p>
+          <ul class="filter-option-list" aria-labelledby="tech-filter-title">
+            {technologyTags.filter((tag) => tagCounts.has(tag)).map((tag) => <li><button class="category-filter-option" type="button" data-filter-value={tag} aria-pressed="false"><span>{tag}</span><span class="filter-count">{tagCounts.get(tag)}</span></button></li>)}
+          </ul>
+        </div>
+        <div class="filter-reset-row"><button class="filter-reset is-idle" type="button" data-filter-reset>필터 초기화</button></div>
+      </details>
+      <div class="post-list" data-post-list>{posts.map((post) => <PostCard post={post} heading="h2" />)}</div>
+      <p class="empty-posts" data-empty-posts hidden>조건에 맞는 글이 없습니다. 다른 주제나 기술을 선택해 보세요.</p>
     </section>
   </main>
   <script>
-    const postBrowser = document.querySelector("[data-post-browser]");
+    const browser = document.querySelector("[data-post-browser]");
+    if (browser) {
+      const rows = Array.from(browser.querySelectorAll<HTMLElement>("[data-post-tags]"));
+      const techControls = Array.from(browser.querySelectorAll<HTMLButtonElement>("[data-filter-value]"));
+      const categoryControls = Array.from(browser.querySelectorAll<HTMLButtonElement>("[data-category-value]"));
+      const sortControls = Array.from(browser.querySelectorAll<HTMLButtonElement>("[data-sort-value]"));
+      const postList = browser.querySelector("[data-post-list]");
+      const countLabel = browser.querySelector("[data-post-count]");
+      const summary = browser.querySelector("[data-filter-summary]");
+      const emptyLabel = browser.querySelector<HTMLElement>("[data-empty-posts]");
+      const reset = browser.querySelector<HTMLButtonElement>("[data-filter-reset]");
+      const techValues = new Set(techControls.map((control) => control.dataset.filterValue!));
+      const categoryValues = new Set(categoryControls.map((control) => control.dataset.categoryValue!));
+      let selectedTags = new Set<string>();
+      let selectedCategory = "";
+      let selectedSort = "recommended";
 
-    if (postBrowser) {
-      const rows = Array.from(postBrowser.querySelectorAll("[data-post-tech-stacks]"));
-      const controls = Array.from(postBrowser.querySelectorAll("[data-filter-value]"));
-      const sortControls = Array.from(
-        postBrowser.querySelectorAll<HTMLButtonElement>("[data-sort-value]")
-      );
-      const postList = postBrowser.querySelector<HTMLElement>("[data-post-list]");
-      const countLabel = postBrowser.querySelector("[data-post-count]");
-      const resetButton = postBrowser.querySelector<HTMLButtonElement>("[data-filter-reset]");
-      const filterValues = new Set<string>(
-        controls
-          .map((control) => control.getAttribute("data-filter-value"))
-          .filter((value): value is string => value !== null)
-      );
-      const sortValues = new Set(["recommended", "latest"]);
-      let activeTechStacks = new Set<string>();
-      let activeSort = "recommended";
-
-      const getRowTechStacks = (row: Element) =>
-        row.getAttribute("data-post-tech-stacks")?.split("|").filter(Boolean) ?? [];
-
-      const getRowNumber = (row: Element, attribute: string) => {
-        const value = Number(row.getAttribute(attribute));
-        return Number.isFinite(value) ? value : 0;
-      };
-
-      const sortRows = (sortValue: string) => {
-        if (!postList) return;
-
-        const sortedRows = [...rows].sort((a, b) => {
-          const dateDifference = getRowNumber(b, "data-post-date") - getRowNumber(a, "data-post-date");
-
-          if (sortValue === "latest") {
-            return dateDifference || getRowNumber(a, "data-post-priority") - getRowNumber(b, "data-post-priority");
-          }
-
-          return (
-            getRowNumber(a, "data-post-priority") - getRowNumber(b, "data-post-priority") ||
-            dateDifference
-          );
-        });
-
-        sortedRows.forEach((row) => postList.appendChild(row));
-      };
-
-      const setSort = (sortValue: string, writeHistory = true) => {
-        const nextSort = sortValues.has(sortValue) ? sortValue : "recommended";
-        const hasChanged = activeSort !== nextSort;
-
-        activeSort = nextSort;
-        sortRows(nextSort);
-
-        sortControls.forEach((control) => {
-          const isActive = control.getAttribute("data-sort-value") === nextSort;
-          control.classList.toggle("is-active", isActive);
-          control.setAttribute("aria-pressed", String(isActive));
-        });
-
-        if (writeHistory && hasChanged) {
-          const url = new URL(window.location.href);
-          if (nextSort === "recommended") {
-            url.searchParams.delete("sort");
-          } else {
-            url.searchParams.set("sort", nextSort);
-          }
-          window.history.pushState({ sort: nextSort }, "", url);
-        }
-      };
-
-      const setSelectedTechStacks = (techStacks: string[], writeHistory = true) => {
-        const selectedValues = techStacks.filter((techStack) => filterValues.has(techStack));
-        const selected = new Set(selectedValues);
-        const hasChanged =
-          selected.size !== activeTechStacks.size ||
-          selectedValues.some((techStack) => !activeTechStacks.has(techStack));
+      const render = () => {
         let visibleCount = 0;
-
         rows.forEach((row) => {
-          const rowTechStacks = getRowTechStacks(row);
-          const shouldShow =
-            selected.size === 0 || rowTechStacks.some((techStack) => selected.has(techStack));
-          row.toggleAttribute("hidden", !shouldShow);
-          if (shouldShow) visibleCount += 1;
+          const tags = row.dataset.postTags?.split("|") ?? [];
+          const matchesCategory = !selectedCategory || row.dataset.postCategory === selectedCategory;
+          const matchesTech = !selectedTags.size || tags.some((tag) => selectedTags.has(tag));
+          row.hidden = !matchesCategory || !matchesTech;
+          if (!row.hidden) visibleCount += 1;
         });
-
-        controls.forEach((control) => {
-          const value = control.getAttribute("data-filter-value");
-          const isActive = value !== null && selected.has(value);
-          control.classList.toggle("is-active", isActive);
-          control.setAttribute("aria-pressed", String(isActive));
-        });
-
-        if (countLabel) {
-          countLabel.textContent =
-            selected.size === 0 ? `${rows.length}개 글` : `${visibleCount}개 글 · ${selected.size}개 기술 선택`;
-        }
-
-        if (resetButton) {
-          resetButton.classList.toggle("is-idle", selected.size === 0);
-        }
-
-        if (writeHistory && hasChanged) {
-          const url = new URL(window.location.href);
-          url.searchParams.delete("category");
-          url.searchParams.delete("tech");
-          selectedValues.forEach((techStack) => url.searchParams.append("tech", techStack));
-          window.history.pushState({ tech: selectedValues }, "", url);
-        }
-
-        activeTechStacks = selected;
+        const updateControls = (controls: HTMLButtonElement[], isActive: (control: HTMLButtonElement) => boolean) => {
+          controls.forEach((control) => {
+            const active = isActive(control);
+            control.classList.toggle("is-active", active);
+            control.setAttribute("aria-pressed", String(active));
+          });
+        };
+        updateControls(techControls, (control) => selectedTags.has(control.dataset.filterValue!));
+        updateControls(categoryControls, (control) => selectedCategory === control.dataset.categoryValue);
+        updateControls(sortControls, (control) => selectedSort === control.dataset.sortValue);
+        const categoryLabel = categoryControls.find((control) => control.dataset.categoryValue === selectedCategory)?.querySelector("span")?.textContent;
+        const labels = [
+          selectedCategory ? categoryLabel : "",
+          selectedTags.size === 1 ? [...selectedTags][0] : selectedTags.size ? `기술 ${selectedTags.size}개` : ""
+        ].filter(Boolean);
+        if (countLabel) countLabel.textContent = `${visibleCount}개 글`;
+        if (summary) summary.textContent = labels.length ? labels.join(" · ") : "주제와 기술로 좁혀 보기";
+        if (emptyLabel) emptyLabel.hidden = visibleCount !== 0;
+        reset?.classList.toggle("is-idle", !selectedCategory && !selectedTags.size);
+        const number = (row: HTMLElement, key: "postDate" | "postPriority") => Number(row.dataset[key]) || 0;
+        [...rows].sort((a, b) => selectedSort === "latest"
+          ? number(b, "postDate") - number(a, "postDate") || number(a, "postPriority") - number(b, "postPriority")
+          : number(a, "postPriority") - number(b, "postPriority") || number(b, "postDate") - number(a, "postDate")
+        ).forEach((row) => postList?.appendChild(row));
       };
 
-      const readSelectedTechStacksFromUrl = () => {
+      const writeUrl = () => {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("tech");
+        [...selectedTags].forEach((tag) => url.searchParams.append("tech", tag));
+        selectedCategory ? url.searchParams.set("category", selectedCategory) : url.searchParams.delete("category");
+        selectedSort === "latest" ? url.searchParams.set("sort", "latest") : url.searchParams.delete("sort");
+        if (url.href !== window.location.href) window.history.pushState(null, "", url);
+      };
+      const readUrl = () => {
         const params = new URLSearchParams(window.location.search);
-        return params.getAll("tech");
+        selectedTags = new Set(params.getAll("tech").filter((tag) => techValues.has(tag)));
+        const category = params.get("category") ?? "";
+        selectedCategory = categoryValues.has(category) ? category : "";
+        selectedSort = params.get("sort") === "latest" ? "latest" : "recommended";
+        render();
       };
-
-      const readSortFromUrl = () => {
-        const params = new URLSearchParams(window.location.search);
-        return params.get("sort") ?? "recommended";
-      };
-
-      setSort(readSortFromUrl(), false);
-      setSelectedTechStacks(readSelectedTechStacksFromUrl(), false);
-
-      sortControls.forEach((control) => {
-        control.addEventListener("click", () => {
-          setSort(control.getAttribute("data-sort-value") ?? "recommended");
-        });
+      techControls.forEach((control) => control.addEventListener("click", () => {
+        const tag = control.dataset.filterValue!;
+        selectedTags.has(tag) ? selectedTags.delete(tag) : selectedTags.add(tag);
+        render(); writeUrl();
+      }));
+      categoryControls.forEach((control) => control.addEventListener("click", () => {
+        selectedCategory = control.dataset.categoryValue!;
+        render(); writeUrl();
+      }));
+      sortControls.forEach((control) => control.addEventListener("click", () => {
+        selectedSort = control.dataset.sortValue!;
+        render(); writeUrl();
+      }));
+      reset?.addEventListener("click", () => {
+        selectedCategory = ""; selectedTags = new Set();
+        render(); writeUrl();
       });
-
-      controls.forEach((control) => {
-        control.addEventListener("click", () => {
-          const value = control.getAttribute("data-filter-value");
-          if (!value) return;
-
-          const nextSelection = new Set(activeTechStacks);
-          if (nextSelection.has(value)) {
-            nextSelection.delete(value);
-          } else {
-            nextSelection.add(value);
-          }
-
-          setSelectedTechStacks(Array.from(nextSelection));
-        });
-      });
-
-      resetButton?.addEventListener("click", () => {
-        setSelectedTechStacks([]);
-      });
-
-      window.addEventListener("popstate", () => {
-        setSort(readSortFromUrl(), false);
-        setSelectedTechStacks(readSelectedTechStacksFromUrl(), false);
-      });
+      window.addEventListener("popstate", readUrl);
+      readUrl();
     }
   </script>
 </BaseLayout>

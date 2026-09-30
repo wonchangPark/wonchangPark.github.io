@@ -2,32 +2,23 @@
 import { getCollection, render } from "astro:content";
 import PostLayout from "@layouts/PostLayout.astro";
 import { getRepresentativePosts } from "@lib/posts";
+import { getProjectForPost } from "@lib/projects";
 
 export async function getStaticPaths() {
-  const posts = await getCollection("blog");
-
-  return posts.map((post) => ({
-    params: { slug: post.id },
-    props: { post }
-  }));
+  return (await getCollection("blog")).map((post) => ({ params: { slug: post.id }, props: { post } }));
 }
-
 const { post } = Astro.props;
-const { Content } = await render(post);
-const relatedPosts = (await getRepresentativePosts())
-  .filter((relatedPost) => relatedPost.id !== post.id)
-  .slice(0, 3);
+const { Content, headings } = await render(post);
+const project = getProjectForPost(post);
+const candidates = (await getRepresentativePosts()).filter((item) => item.id !== post.id);
+const relatedPosts = candidates.sort((a, b) => {
+  const score = (item: typeof a) => project && item.data.project === project.id ? 0 : item.data.category === post.data.category ? 1 : 2;
+  return score(a) - score(b);
+}).slice(0, 3);
 ---
-
-<PostLayout
-  title={post.data.title}
-  description={post.data.description}
-  pubDate={post.data.pubDate}
-  category={post.data.category}
-  author={post.data.author}
-  tags={post.data.tags}
-  proof={post.data.proof}
-  relatedPosts={relatedPosts}
->
+<PostLayout title={post.data.title} description={post.data.description}
+  pubDate={post.data.pubDate} updatedDate={post.data.updatedDate} category={post.data.category} author={post.data.author}
+  tags={post.data.tags} headings={headings} project={project} relatedPosts={relatedPosts}
+  isLearningNote={post.data.kind === "learning-note"}>
   <Content />
 </PostLayout>

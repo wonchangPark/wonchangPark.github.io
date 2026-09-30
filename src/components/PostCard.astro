@@ -1,28 +1,22 @@
 ---
 import type { CollectionEntry } from "astro:content";
-
-interface Props {
-  post: CollectionEntry<"blog">;
-}
-
-const { post } = Astro.props;
-const formattedDate = post.data.pubDate.toLocaleDateString("ko-KR", {
-  year: "numeric",
-  month: "short",
-  day: "numeric"
-});
+import Icon from "./Icon.astro";
+import { getReadingPriority, getCompactDescription } from "@lib/posts";
+import { getProjectForPost } from "@lib/projects";
+import { getTopic } from "@lib/taxonomy";
+interface Props { post: CollectionEntry<"blog">; compact?: boolean; heading?: "h2" | "h3"; }
+const { post, compact = false, heading: Heading = "h3" } = Astro.props;
+const date = post.data.pubDate.toLocaleDateString("ko-KR", { year: "numeric", month: "2-digit", day: "2-digit" });
+const project = getProjectForPost(post);
 ---
-
-<a class="post-card article-link" href={`/posts/${post.id}/`} aria-label={`${post.data.title} 글 읽기`}>
-  <div class="post-card-main">
-    <p class="article-meta">
-      {post.data.proof && <span class="proof-label">{post.data.proof}</span>}
-      {post.data.category} · {post.data.author} · <time datetime={post.data.pubDate.toISOString()}>{formattedDate}</time>
-    </p>
-    <h3>{post.data.title}</h3>
-    <p>{post.data.description}</p>
+<a class:list={["post-row", { "post-row--compact": compact }]}
+  href={"/posts/" + post.id + "/"} aria-label={post.data.title + " 글 읽기"}
+  data-post-tags={post.data.tags.join("|")} data-post-category={post.data.category} data-post-priority={getReadingPriority(post)} data-post-date={post.data.pubDate.valueOf()}>
+  <div class="post-row-main">
+    {!compact && <p class="article-meta"><span>{getTopic(post.data.category)}</span>{project && <span>{project.name}</span>}<time datetime={post.data.pubDate.toISOString()}>{date}</time>{post.data.kind === "learning-note" && <span>학습 노트</span>}</p>}
+    <Heading>{post.data.title}</Heading>
+    <p class="post-description">{compact ? getCompactDescription(post) : post.data.description}</p>
+    {!compact && <ul class="tag-list" aria-label="기술 태그">{post.data.tags.map((tag) => <li>{tag}</li>)}</ul>}
   </div>
-  <ul class="tag-list" aria-label="태그">
-    {post.data.tags.slice(0, 2).map((tag) => <li><span class="tag">{tag}</span></li>)}
-  </ul>
+  <span class="post-row-end">{compact && <span class="post-topic">{getTopic(post.data.category)}</span>}<Icon /></span>
 </a>

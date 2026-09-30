@@ -1,142 +1,37 @@
 ---
 import BaseLayout from "@layouts/BaseLayout.astro";
 import PostCard from "@components/PostCard.astro";
-import { getPublishedPosts, getRepresentativePosts } from "@lib/posts";
-
-const representativePosts = await getRepresentativePosts();
-const posts = await getPublishedPosts();
-const heroPost = representativePosts[0] ?? posts[0];
-const readingPathPosts = representativePosts
-  .filter((post) => post.id !== heroPost?.id)
-  .slice(0, 4);
+import Icon from "@components/Icon.astro";
+import { getRepresentativePosts } from "@lib/posts";
+import { projects } from "@lib/projects";
+const posts = (await getRepresentativePosts()).slice(0, 3);
 ---
-
 <BaseLayout>
-  <main>
-    <section class="hero-wrap">
-      <div class="site-shell hero">
-        <div>
-          <nav class="topic-tabs" aria-label="대표 기술 주제">
-            <ul class="category-tabs">
-              <li><a class="category-tab active" href="/posts/event-approval-jsonb-snapshot/">Domain Modeling</a></li>
-              <li><a class="category-tab" href="/posts/outbox-sqs-price-recalculation/">Reliability</a></li>
-              <li><a class="category-tab" href="/posts/settlement-cost-confirmation-snapshot/">Settlement</a></li>
-              <li><a class="category-tab" href="/posts/kms-terraform-secret-boundary/">Infra / Security</a></li>
-            </ul>
-          </nav>
-          <p class="eyebrow">Java/Spring Backend Engineer</p>
-          <h1>
-            <span>정산·승인·송금처럼</span>
-            <span>실패 비용이 큰 도메인을</span>
-            <span>안정적으로 설계합니다.</span>
-          </h1>
-          <p class="lead">
-            Club Minish와 정산 시스템에서 293+ merged PR로 approval workflow, 비용확정 snapshot,
-            Outbox/SQS 재처리, KMS/Terraform 운영 경계를 구현했습니다. 실제 코드는 공개하지 않고
-            문제, 설계 판단, 운영 효과를 일반화해 기록합니다.
-          </p>
-          <div class="hero-actions">
-            <a class="button primary" href="#representative-posts">대표 설계 글 보기</a>
-            <a class="text-link" href="/resume/">이력 요약</a>
-            <a class="text-link" href="https://github.com/wonchangPark">GitHub</a>
-          </div>
-        </div>
-        <aside class="hero-evidence" aria-label="Portfolio evidence">
-          <p class="kicker">Evidence</p>
-          <ul class="evidence-list">
-            <li>
-              <strong>293+ merged PRs</strong>
-              <span>Club Minish 162개, 정산 시스템 131개 PR로 기능 설계와 운영 개선을 지속했습니다.</span>
-            </li>
-            <li>
-              <strong>5-step settlement flow</strong>
-              <span>preview, confirm, payment, transfer, audit 흐름에서 비용 근거와 상태 전이를 분리했습니다.</span>
-            </li>
-            <li>
-              <strong>Outbox / KMS / OTel</strong>
-              <span>장애 격리, secret 경계, 관측성까지 제품 운영에 필요한 백엔드 기반을 다뤘습니다.</span>
-            </li>
-          </ul>
-        </aside>
+  <main id="main-content" tabindex="-1" class="site-shell">
+    <section class="home-intro">
+      <p class="eyebrow">Backend Engineer</p>
+      <h1>백엔드 개발자 박원창</h1>
+      <p class="home-statement">정산·승인·송금처럼 실패 비용이 큰 도메인을 안정적으로 설계합니다.</p>
+      <p class="home-profile">Java/Spring Boot · Minish 2025.03–현재</p>
+      <a class="button primary" href="/posts/">기술 글 읽기 <Icon /></a>
+    </section>
+    <section class="home-section" aria-labelledby="projects-title">
+      <div class="section-head"><h2 id="projects-title">대표 프로젝트</h2><a class="section-link" href="/about/">전체 프로젝트 <Icon /></a></div>
+      <div class="project-index">
+        {projects.map((project, index) => (
+          <article class="project-row">
+            <span class="project-number">{String(index + 1).padStart(2, "0")}</span>
+            <div class="project-row-main"><h3>{project.name}</h3>{project.id !== "walking-trip" && <p class="project-focus">{project.focus}</p>}<p class="project-description">{project.description}</p></div>
+            <div class="project-actions">
+              <a href={"/about/#" + project.id} aria-label={project.name + " 프로젝트 보기"}>프로젝트 보기 <Icon /></a>
+            </div>
+          </article>
+        ))}
       </div>
     </section>
-
-    {heroPost && (
-      <section class="site-shell feature-section" id="representative-posts">
-        <div class="section-intro">
-          <div>
-            <p class="section-label">면접용 읽기 순서</p>
-            <h2>대표 기술 글</h2>
-            <p>
-              면접에서 바로 설명하기 좋은 설계 경험을 승인, 장애 격리, 정산, 마이그레이션, 인프라 순서로 정리했습니다.
-            </p>
-          </div>
-          <a class="section-link" href="/posts/">전체 글 보기</a>
-        </div>
-        <a
-          class="featured-story article-link"
-          href={`/posts/${heroPost.id}/`}
-          aria-label={`${heroPost.data.title} 글 읽기`}
-        >
-          <div>
-            <p class="article-meta featured-meta">
-              <span class="content-type">대표 사례 01</span>
-              {heroPost.data.proof && <span class="proof-label">{heroPost.data.proof}</span>}
-              <span>{heroPost.data.category} · {heroPost.data.author}</span>
-            </p>
-            <h2>{heroPost.data.title}</h2>
-            <p>
-              {heroPost.data.description}
-            </p>
-          </div>
-          <div class="feature-side">
-            <time datetime={heroPost.data.pubDate.toISOString()}>
-              {heroPost.data.pubDate.toLocaleDateString("ko-KR", {
-                year: "numeric",
-                month: "long",
-                day: "numeric"
-              })}
-            </time>
-            <span class="read-cue" aria-hidden="true">글 읽기</span>
-          </div>
-        </a>
-      </section>
-    )}
-
-    <section class="site-shell section article-section">
-      <div class="section-intro">
-        <div>
-          <p class="section-label">보충 설계 노트</p>
-          <h2>문제 해결 흐름</h2>
-          <p>
-            대표 사례를 보완하는 장애 격리, 비용 확정, 마이그레이션, 보안 경계 기록입니다.
-          </p>
-        </div>
-        <a class="section-link" href="/posts/">글 목록 보기</a>
-      </div>
-      <div class="post-list subtle-list">
-        {readingPathPosts.map((post) => <PostCard post={post} />)}
-      </div>
-    </section>
-
-    <section class="site-shell section">
-      <div class="principles editorial-principles">
-        <section class="principle">
-          <span>01</span>
-          <h3>상태 전이를 먼저 본다</h3>
-          <p>데이터가 언제 바뀌고, 언제 더 이상 바뀌면 안 되는지를 기준으로 API와 테이블을 설계합니다.</p>
-        </section>
-        <section class="principle">
-          <span>02</span>
-          <h3>실패 경로를 데이터로 남긴다</h3>
-          <p>외부 API와 비동기 작업은 실패를 전제로 두고 멱등성, outbox, retry 경로를 둡니다.</p>
-        </section>
-        <section class="principle">
-          <span>03</span>
-          <h3>운영자가 설명할 수 있게 만든다</h3>
-          <p>승인, 송금, 비용확정처럼 민감한 작업은 이력과 산출 근거를 남겨 추적 가능하게 합니다.</p>
-        </section>
-      </div>
+    <section class="home-section home-writing" aria-labelledby="writing-title">
+      <div class="section-head"><h2 id="writing-title">기술 기록</h2><a class="section-link" href="/posts/">전체 글 <Icon /></a></div>
+      <div class="post-list">{posts.map((post) => <PostCard post={post} compact />)}</div>
     </section>
   </main>
 </BaseLayout>

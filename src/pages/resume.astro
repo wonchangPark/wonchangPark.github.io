@@ -1,33 +1,61 @@
 ---
 import BaseLayout from "@layouts/BaseLayout.astro";
+import Icon from "@components/Icon.astro";
 ---
-
-<BaseLayout title="Resume - 박원창" description="박원창 백엔드 엔지니어 이력 요약">
-  <main class="site-shell resume-panel">
-    <section>
-      <p class="eyebrow">Resume</p>
-      <h1>Backend Engineer</h1>
-      <p class="lead">
-        Java/Spring Boot 기반으로 Club Minish 서비스와 정산 시스템의 핵심 도메인을 설계하고 구현했습니다.
-        승인, 정산, 송금처럼 실패 비용이 큰 흐름에서 상태 전이, 감사 가능성, 재처리 경로, 운영 보안까지 함께 다뤘습니다.
-      </p>
-      <div class="hero-actions">
-        <a class="button primary" href="https://github.com/wonchangPark">GitHub</a>
-        <a class="button" href="/posts/">기술 글</a>
-      </div>
-    </section>
-    <section class="resume-box">
-      <h2>핵심 경험</h2>
-      <ul>
-        <li>Club Minish 162개 merged PR, 정산 시스템 131개 merged PR 수행</li>
-        <li>주요 기능 PR에서 696~733개 테스트를 통과시키며 정산/검수 흐름의 회귀 위험을 낮춤</li>
-        <li>JSONB snapshot과 approvalGroupId 기반 이벤트 approval workflow 설계</li>
-        <li>Outbox/SQS 기반 이벤트 가격 재계산 파이프라인으로 저장 실패와 파생 계산 실패를 분리</li>
-        <li>5단계 정산 프로세스와 비용확정 snapshot으로 과거 산출 근거 보존</li>
-        <li>CMS/Hecto 송금 멱등성, 결과 조회, KMS 암호화 적용</li>
-        <li>Terraform 기반 ECS/RDS/ElastiCache/KMS 인프라 구성과 stage/prod 스택 분리, DB secret bootstrap 경계 설계</li>
-        <li>OpenTelemetry, Loki, Prometheus, Tempo, Grafana 관측성 스택 구성</li>
-      </ul>
-    </section>
+<BaseLayout title="이력서 | 박원창" description="클럽미니쉬 이벤트·가격 처리와 정산 아키텍처를 설계·구현한 백엔드 개발자 박원창의 경력과 프로젝트">
+  <main id="main-content" tabindex="-1" class="site-shell">
+    <header class="page-intro resume-intro">
+      <p class="eyebrow">Resume</p><h1>박원창 · 백엔드 개발자</h1>
+      <p class="lead">클럽미니쉬의 이벤트·가격 처리와 정산 시스템 아키텍처를 설계·구현했습니다. 도메인 모델과 데이터 정합성, 비동기 갱신·재처리 흐름을 다룹니다.</p>
+      <div class="experience-links"><a class="section-link" href="https://github.com/wonchangPark">GitHub <Icon name="arrow-up-right" /></a><a class="section-link" href="/about/">설계 사례 보기 <Icon /></a><a class="section-link" href="/posts/">기술 글 읽기 <Icon /></a></div>
+    </header>
+    <div class="resume-content">
+      <section class="resume-section" aria-labelledby="career-title">
+        <h2 id="career-title">경력</h2>
+        <article class="career-entry">
+          <header class="career-head"><h3>미니쉬테크놀로지</h3><p class="career-period">2025.03–현재</p></header>
+          <p class="career-role">백엔드 개발 및 업무 시스템 구현</p>
+          <ul class="experience-list">
+            <li><strong>이벤트·템플릿 도입과 계산된 가격의 저장</strong><p>클럽미니쉬 초기 이벤트 도메인에 이벤트 템플릿을 도입했습니다. 이벤트·템플릿 모델과 관리자·사용자 API, 가격·할인 계산 구조를 설계·구현하고 계산 결과를 저장해 조회에서 활용하도록 구성했습니다.</p></li>
+            <li><strong>이벤트 변경에 따른 가격 갱신과 Outbox</strong><p>이벤트 수정과 저장된 가격 갱신을 연결하는 Outbox 기반 비동기 흐름을 설계·구현했습니다. 원본 저장과 파생 계산의 실패 경계를 나누고 갱신·재처리 경로를 구성했습니다.</p></li>
+            <li><strong>정산 시스템의 전체 아키텍처 설계 주도</strong><p>전반적인 아키텍처 설계와 핵심 도메인 구현을 주도했습니다. 단계별 확정·변경 제한, 미리보기·저장 공통 검증, 기준정보와 확정 스냅샷 분리, 모델 이관과 기존 API 호환을 구성했습니다.</p></li>
+            <li><strong>승인 요청과 운영 데이터 분리</strong><p>검수 요청은 버전이 있는 스냅샷으로 보존하고 승인 시점에 운영 데이터에 반영하도록 구성했습니다. 반려·재요청 이력과 동시 요청, 업체별 접근 경계를 보완했습니다.</p></li>
+            <li><strong>엑셀 입력의 메모리·트랜잭션·조회 경계 개선</strong><p>SAX 스트리밍과 이미지 지연 로딩, 입력 상한을 적용했습니다. 파싱·외부 파일 저장을 DB 트랜잭션 밖으로 분리하고 행별 참조 조회를 묶음 조회로 바꾸면서 파일 순서를 유지했습니다.</p></li>
+            <li><strong>테스트와 배포 재현성</strong><p>CI와 테스트 프로필, 환경별 인프라와 DB 마이그레이션 절차를 정리했습니다. 소스 커밋과 불변 이미지 식별자를 연결해 배포 이력을 추적하도록 개선했습니다.</p></li>
+          </ul>
+          <div class="experience-links"><a class="section-link" href="/about/#club-minish">클럽미니쉬 설계 사례 <Icon /></a><a class="section-link" href="/about/#settlement">정산 설계 사례 <Icon /></a></div>
+        </article>
+        <article class="career-entry">
+          <header class="career-head"><h3>티맥스 비아이</h3><p class="career-period">2023.07–2025.01</p></header>
+          <p class="career-role">권한 관리 및 데이터 마이그레이션</p>
+          <ul class="experience-list">
+            <li><strong>역할·권한·그룹 기반 권한 관리</strong><p>계층형 권한 모델을 구현하고 계산된 권한을 결과 테이블로 관리했습니다. 공통 권한 검증 API를 구성했습니다.</p></li>
+            <li><strong>Spring Batch 기반 데이터 마이그레이션</strong><p>커서 읽기, API 서버 경유 쓰기, 청크 처리와 멀티스레드 전송을 적용했습니다. 요청 상태와 로그를 남겨 실패 건을 추적하고 재처리하도록 구성했습니다.</p></li>
+          </ul>
+        </article>
+      </section>
+      <section class="resume-section" aria-labelledby="resume-projects-title">
+        <h2 id="resume-projects-title">프로젝트</h2>
+        <article class="career-entry">
+          <header class="career-head"><h3>걸음여행</h3><p class="career-period">2026년</p></header>
+          <p class="career-role">2인 팀 공동 기획 · 도메인 설계와 개발 전반 주도</p>
+          <p class="resume-project-summary">국내의 다양한 명소와 걷기 좋은 길을 발견하도록, 개별 장소뿐 아니라 도보 경로를 선형 데이터로 저장하고 지도에 시각화하는 서비스입니다. 이 제품 목적을 코스·구간 중심의 도메인 모델로 구체화하고 서버와 필요한 앱 기능을 개발했습니다.</p>
+          <ul class="experience-list">
+            <li><strong>코스·구간과 완주·진행 상태 설계</strong><p>코스는 완주 단위, 구간은 기록·재개 단위로 분리하고 구간별 진행 증거를 부모 코스의 완주·보상에 연결하는 서버 계약을 구성했습니다.</p></li>
+            <li><strong>경로 데이터와 GPS 진행 계산</strong><p>GPX 좌표 정규화와 연속 구간 생성, 안정적인 코스·구간 ID를 구현했습니다. GPS 샘플을 경로에 투영해 진행·잔여 경로를 계산하고 경로 이탈과 비정상 전진을 구분했습니다.</p></li>
+            <li><strong>기록 업로드와 계정별 데이터 경계</strong><p>기록 순서를 보존하는 영속 업로드 대기열과 계정별 화면 캐시를 구현했습니다. 관광 데이터는 완전한 수집 결과만 반영하도록 구성했습니다.</p></li>
+          </ul>
+          <a class="section-link" href="/about/#walking-trip">걸음여행 프로젝트 보기 <Icon /></a>
+        </article>
+      </section>
+      <section class="resume-section" aria-labelledby="skills-title">
+        <h2 id="skills-title">기술</h2>
+        <dl class="resume-skills"><dt>백엔드</dt><dd>Java, Spring Boot, JPA, Querydsl, PostgreSQL, Redis, SQS</dd><dt>개발과 운영</dt><dd>Docker, Terraform, GitHub Actions, Flyway, AWS</dd><dt>프로젝트 확장</dt><dd>TypeScript, React Native, Expo, Supabase, PostGIS</dd></dl>
+      </section>
+      <section class="resume-section" aria-labelledby="education-title">
+        <h2 id="education-title">학력과 교육</h2>
+        <ul class="education-list"><li><strong>숭실대학교</strong><p>2015.03–2022.02 · 전자정보공학부 IT융합전공 졸업</p></li><li><strong>삼성 청년 SW 아카데미</strong><p>2022.01–2022.12 · SSAFY 7기 자바 전공반</p></li></ul>
+      </section>
+    </div>
   </main>
 </BaseLayout>

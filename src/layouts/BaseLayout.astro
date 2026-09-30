@@ -1,19 +1,14 @@
 ---
+import "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css";
 import "@styles/global.css";
-
-interface Props {
-  title?: string;
-  description?: string;
-}
-
+interface Props { title?: string; description?: string; }
 const {
-  title = "박원창 - Backend Engineering Notes",
-  description = "도메인 상태, 정산, 승인 workflow, 운영 안정성을 다루는 백엔드 개발 블로그"
+  title = "박원창 | 백엔드 개발자",
+  description = "이벤트와 가격 처리, 정산 아키텍처, 운영 경험을 기록하는 백엔드 개발자 박원창의 기술 블로그"
 } = Astro.props;
-
 const canonical = new URL(Astro.url.pathname, Astro.site);
+const links = [{ href: "/posts/", label: "글" }, { href: "/about/", label: "프로젝트" }, { href: "/resume/", label: "이력서" }];
 ---
-
 <!doctype html>
 <html lang="ko">
   <head>
@@ -22,6 +17,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="canonical" href={canonical} />
+    <link rel="alternate" type="application/rss+xml" title="박원창의 새 글 구독" href="/rss.xml" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
@@ -29,24 +25,20 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <title>{title}</title>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">본문으로 바로가기</a>
     <header class="site-header">
       <div class="site-shell nav">
-        <a class="brand" href="/" aria-label="Home">
-          <span class="brand-mark">W</span>
-          <span>Wonchang Park</span>
-        </a>
-        <nav class="nav-links" aria-label="Main navigation">
-          <a href="/posts/">Posts</a>
-          <a href="/resume/">Resume</a>
-          <a href="/about/">About</a>
+        <a class="brand" href="/" aria-label="박원창 홈">박원창</a>
+        <nav class="nav-links" aria-label="주요 메뉴">
+          {links.map((link) => <a href={link.href} aria-current={Astro.url.pathname.startsWith(link.href) ? "page" : undefined}>{link.label}</a>)}
           <a href="https://github.com/wonchangPark">GitHub</a>
         </nav>
       </div>
     </header>
     <slot />
     <footer class="site-footer">
-      <div class="site-shell">
-        Backend engineering notes on domain modeling, reliability, security, and operations.
+      <div class="site-shell footer-inner">
+        <a href="/rss.xml">새 글 구독(RSS)</a>
       </div>
     </footer>
   </body>

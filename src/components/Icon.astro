@@ -1,0 +1,9 @@
+---
+import arrowRight from "@phosphor-icons/core/assets/regular/arrow-right.svg?raw";
+import arrowUpRight from "@phosphor-icons/core/assets/regular/arrow-up-right.svg?raw";
+import caretDown from "@phosphor-icons/core/assets/regular/caret-down.svg?raw";
+interface Props { name?: "arrow-right" | "arrow-up-right" | "caret-down"; }
+const { name = "arrow-right" } = Astro.props;
+const icons = { "arrow-right": arrowRight, "arrow-up-right": arrowUpRight, "caret-down": caretDown };
+---
+<span class="icon" aria-hidden="true"><Fragment set:html={icons[name]} /></span>
